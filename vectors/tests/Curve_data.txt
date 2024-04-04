@@ -1,0 +1,17 @@
+Pulse Sequence /Users/leon/Desktop/Physik/Glaser/Analyse_und_Visualisierung_von_robusten_Kontrollpulsen/Pulssequenzen/UR_Pulse/UR36020kHz_30B1_rf10kHz/pulse1000.bruker (4.533°)
+Time per Pulse: 0.5 µs
+Vector Length: 1.0
+Maximum Amplitude: 10.0 kHz
+Offset: 0.0 kHz
+InpoFact: 5
+x Expand: 0.0
+Calculation Method: 1
+Initial Vector: [0 0 1]
+Angle to x-Axis= 13.816557936085145°;
+number of pulses = 1000.0;
+Axy= -5.377039585178995e-10;
+Axz= -4.017795563726022e-09,
+Ayz= -1.0298758804481812e-09;
+Integrated Curvature= 2.8083227471388324e-06;
+Integrated Torsion= 0.011554398091813134;
+Integrated abs Torsion= 33.42168487574758;
