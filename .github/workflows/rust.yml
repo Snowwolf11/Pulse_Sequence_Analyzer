@@ -21,6 +21,7 @@ jobs:
           - windows-latest
           - macOS-latest
           - macOS-14
+          - macOS-11
 
     steps:
       - uses: actions/checkout@v3
