@@ -1,5 +1,4 @@
-import vectors
-
+from vectors import createVectors_Matrix
 from psa.createVectors_Matrix import *
 from psa.calculate_Rtot import *
 from psa.calculate_pulse_sequence_quality import*
@@ -24,7 +23,7 @@ def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRan
     counto = 0
     countZ = 0
     
-    VM =  vectors.createVectors_Matrix(PS.astype(np.float64),np.float64(T),np.float64(l),np.float64(Umax),np.float64(0),1,initialVector.astype(np.float64))
+    VM = createVectors_Matrix(PS.astype(np.float64),np.float64(T),np.float64(l),np.float64(Umax),np.float64(0),1,initialVector.astype(np.float64))
     medianVec = VM[-1,:]
     
     if np.linalg.norm(medianVec[2]) > 5 * (np.linalg.norm(medianVec[1]) + np.linalg.norm(medianVec[0])):
@@ -64,7 +63,7 @@ def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRan
                 counto += 1
                 if counto > len(offsetRange):
                     counto = 1
-                VM = vectors.createVectors_Matrix(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(n), np.float64(n2), 1, initialVector.astype(np.float64))
+                VM = createVectors_Matrix(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(n), np.float64(n2), 1, initialVector.astype(np.float64))
                 Z[j, i] = np.arctan2(np.sqrt(VM[-1,0]**2 + VM[-1,1]**2), VM[-1,2]) * 180 / np.pi
                 countZ += Z[j, i]
     

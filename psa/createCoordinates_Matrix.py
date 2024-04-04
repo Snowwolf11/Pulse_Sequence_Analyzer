@@ -3,8 +3,7 @@
 """
 @author: leon
 """
-import vectors
-
+from vectors import createVectors_Matrix
 from psa.createVectors_Matrix import *
 import numpy as np
 import time
@@ -16,7 +15,7 @@ def createCoordinates_Matrix(PS,T,l,Umax,offset,inpoFact,initialVector):
     #   Detailed explanation goes here
     
     #a = time.time()
-    VM = vectors.createVectors_Matrix(PS.astype(np.float64),np.float64(T),np.float64(l),np.float64(Umax),np.float64(offset),int(inpoFact),initialVector.astype(np.float64))
+    VM = createVectors_Matrix(PS.astype(np.float64),np.float64(T),np.float64(l),np.float64(Umax),np.float64(offset),int(inpoFact),initialVector.astype(np.float64))
     #b = time.time()
     #print("Time: " + str(b-a))
     h = np.ones((np.shape(VM)[0]+1,3))
