@@ -98,11 +98,11 @@ Animate a video of AHT-Curves with offset or pulse amplitude as changing paramet
 2.createQualityImages
 Create an Image which displays the stability of pulse sequences with increasing lengths in dependence of the offset per color coding. To do so insert the path of the folder which contains the pulse sequences into the directory field and the name the Image shall be saved under in the 'save under' field. After the Image is calculated it will also open in a figure, which can also be saved. The parameter Offset Range defines in which Offset Range (in kHz, 0kHz is in center; e.g. 20kHz->-10kHz - 10kHz) the curve quality shall be calculated. The field 'class' sets if the pulses are UR or SS pulses. Resolution sets how many pixels per kHz Range per pulse shall be calculated. Pulse Angle isn't yet functional. The calculate Image feature till now just works with all State to State pulses and 0° /360° UR pulses. With the default settings calculating an Image from a folder with 150 pulse sequences can take up to half an hour."""
 
-        
         self.user_interaction = False
         self.disp_values = False       
         self.update_count = 0
         self.export_count = 0
+        self.export_dir_count = 0
         self.qualityImages_export_count = 0
         self.play_amplitude_bool = False
         self.play_offset_bool = False
@@ -245,6 +245,8 @@ Create an Image which displays the stability of pulse sequences with increasing 
         self.export_browse_directory_button.grid(row = 1, column = 2, padx = 10, pady = 10)
         self.export_data_path_button =  tk.Button(self.options_frame,  text="Export Data", command=self.export_data_interface)
         self.export_data_path_button.grid(row = 1, column = 3, padx = 10, pady = 10)    
+        self.export_data_path_button =  tk.Button(self.options_frame,  text="Export Dir Data", command=self.export_dir_data_interface)  #export data of all the pulses nin the same directory as the active pulse
+        self.export_data_path_button.grid(row = 1, column = 4, padx = 10, pady = 10)    
 			######## Quality Images stuff
         self.createQualityImages_label = tk.Label(self.options_frame, text = "create Quality Images")
         self.createQualityImages_label.grid(row = 2, column = 2, sticky = "E")
@@ -296,14 +298,14 @@ Create an Image which displays the stability of pulse sequences with increasing 
         self.qualityImages_input_dir_label.grid(row = 6, column = 0, sticky = "E")
         self.qualityImages_input_dir_text =  tk.Entry(self.options_frame, width = 40)
         self.qualityImages_input_dir_text.grid(row = 6, column= 1, columnspan = 2, sticky ="W")
-        self.qualityImages_input_dir_text.insert(0, "/Users/leon/Desktop/Physik/Glaser/Analyse_und_Visualisierung_von_robusten_Kontrollpulsen/Pulssequenzen/BIBOP_sorted_20kHz_noB1_rf10kHz")
+        self.qualityImages_input_dir_text.insert(0, "/Users/leon/Desktop/Physik/Glaser/Analyse_und_Visualisierung_von_robusten_Kontrollpulsen/Pulssequenzen/UR_Pulse/UR_ohne_B1_robustness_20_kHz/UR360_20kHz_noB1_rf10kHz(new_loop_sorted)")
         self.qualityImages_input_dir_button =  tk.Button(self.options_frame,  text="Browse", command=self.qualityImages_input_browse_directory)
         self.qualityImages_input_dir_button.grid(row = 6, column = 2)        
         self.qualityImages_output_dir_label = tk.Label(self.options_frame, text="Output Directory:")
         self.qualityImages_output_dir_label.grid(row = 7, column = 0, sticky = "E")
         self.qualityImages_output_dir_text =  tk.Entry(self.options_frame, width = 40)
         self.qualityImages_output_dir_text.grid(row = 7, column= 1, columnspan = 2, sticky ="W")
-        self.qualityImages_output_dir_text.insert(0, "/Users/leon/Desktop/Physik/Glaser")
+        self.qualityImages_output_dir_text.insert(0, "/Users/leon/Desktop/Physik/Glaser/Bachelor_Thesis/images/Quality images")
         self.qualityImages_output_dir_button =  tk.Button(self.options_frame,  text="Browse", command=self.qualityImages_output_browse_directory)
         self.qualityImages_output_dir_button.grid(row = 7, column = 2)   
 			# calculate Button
@@ -498,13 +500,43 @@ Create an Image which displays the stability of pulse sequences with increasing 
         info_window.title("Info Window")
         info_window_label = tk.Label(info_window, text= "Data will be exported to directory: " + self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count))
         info_window_label.grid(row = 0, column = 0, columnspan = 2)
-        info_window_ok_button = tk.Button(info_window, text="OK", command=lambda: self.export_data(info_window))
+        info_window_ok_button = tk.Button(info_window, text="OK", command=lambda: self.info_window_ok_button_pressed(info_window, 0))
         info_window_ok_button.grid(row = 1, column = 0)
         info_window_cancel_button = tk.Button(info_window, text="cancel", command=lambda: self.cancel_export(info_window))
         info_window_cancel_button.grid(row = 1, column = 1)
 
-    def export_data(self, window):
+    def export_dir_data_interface(self):
+        while os.path.exists(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)):
+            self.export_dir_count += 1
+        info_window = tk.Toplevel(self.master)
+        info_window.title("Info Window")
+        info_window_label = tk.Label(info_window, text= "Directory Data will be exported to directory: " + self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count))
+        info_window_label.grid(row = 0, column = 0, columnspan = 2)
+        info_window_ok_button = tk.Button(info_window, text="OK", command=lambda: self.info_window_ok_button_pressed(info_window, 1))
+        info_window_ok_button.grid(row = 1, column = 0)
+        info_window_cancel_button = tk.Button(info_window, text="cancel", command=lambda: self.cancel_export(info_window))
+        info_window_cancel_button.grid(row = 1, column = 1)
+
+    def info_window_ok_button_pressed(self, window, type):
         window.destroy()
+        if(type == 0):          #just export this pulse
+            self.export_data(type=type)
+        if(type == 1):          #export all sequences from directory
+            os.mkdir(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count))
+            dirname = os.path.dirname(self.PS)
+            files = os.listdir(dirname)
+            sorted_files = sorted(files)
+            PSnames = [f for f in sorted_files if 'bruker' in f]
+            PSnumber = len(PSnames)
+            for n in range(PSnumber):
+                PS = os.path.join(dirname, PSnames[n])
+                self.pulse_sequence_text.delete(0, tk.END)  # Clear any existing text
+                self.pulse_sequence_text.insert(tk.END, PS)
+                self.export_data(type=type, exp_str = PSnames[n].replace(".bruker",""))
+        self.export_count = 0
+        self.export_dir_count = 0
+
+    def export_data(self,type,exp_str="empty"):
         CM, VM, PS_mat, totalRot, phi, numberOfPulses, Axy, Axz, Ayz, arc_length, curvature, torsion, integrated_curvature, integrated_torsion, integrated_absolut_torsion, avg_curvature, avg_torsion = self.update()
         export_string = (f"Pulse Sequence {self.PS} ({round(1E3 * totalRot) / 1E3}°)\n"
 	    f"Time per Pulse: {self.T * 10**6} µs\n"
@@ -523,22 +555,35 @@ Create an Image which displays the stability of pulse sequences with increasing 
 		f"Integrated Curvature= {integrated_curvature};\n"
 		f"Integrated Torsion= {integrated_torsion};\n"
 		f"Integrated abs Torsion= {integrated_absolut_torsion};")
-        os.mkdir(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count))
-        np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/AHT_Curve.csv", CM, delimiter=",")
-        np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Trajectory_Curve.csv", VM, delimiter=",")
-        np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Pulse_Sequence.csv", PS_mat, delimiter=",")
-        np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/curvature-arc_length.csv", np.column_stack((arc_length, curvature)), delimiter=",")
-        np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/torsion-arc_length.csv", np.column_stack((arc_length, torsion)), delimiter=",")
-        with open(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Curve_data.txt", 'w') as file:
-            file.write(export_string)
-        mpld3.save_html(self.fig1, self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/AHT_Curve_plot.html")	#######TODO
-        export_data_interface_str = "data exported to: "+  self.export_data_path_text.get()+str(self.export_count)
-        self.text_area_set(text_area = self.info_error_text, text_str = export_data_interface_str, reset_bool = 0)
-        self.export_count = 0
+        if(type == 0):
+            os.mkdir(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count))
+            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/AHT_Curve.csv", CM, delimiter=",")
+            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Trajectory_Curve.csv", VM, delimiter=",")
+            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Pulse_Sequence.csv", PS_mat, delimiter=",")
+            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/curvature-arc_length.csv", np.column_stack((arc_length, curvature)), delimiter=",")
+            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/torsion-arc_length.csv", np.column_stack((arc_length, torsion)), delimiter=",")
+            with open(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Curve_data.txt", 'w') as file:
+                file.write(export_string)
+            mpld3.save_html(self.fig1, self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/AHT_Curve_plot.html")	#######TODO
+            export_data_interface_str = "data exported to: "+  self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_count)
+            self.text_area_set(text_area = self.info_error_text, text_str = export_data_interface_str, reset_bool = 0)
+        if(type == 1):
+            os.mkdir(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str)
+            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/AHT_Curve.csv", CM, delimiter=",")
+            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/Trajectory_Curve.csv", VM, delimiter=",")
+            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/Pulse_Sequence.csv", PS_mat, delimiter=",")
+            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/curvature-arc_length.csv", np.column_stack((arc_length, curvature)), delimiter=",")
+            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/torsion-arc_length.csv", np.column_stack((arc_length, torsion)), delimiter=",")
+            with open(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/Curve_data.txt", 'w') as file:
+                file.write(export_string)
+            mpld3.save_html(self.fig1, self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/AHT_Curve_plot.html")	#######TODO
+            export_data_interface_str = "data exported to: "+  self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str
+            self.text_area_set(text_area = self.info_error_text, text_str = export_data_interface_str, reset_bool = 0)
         
     def cancel_export(self, window):
         window.destroy()
         self.export_count = 0
+        self.export_dir_count = 0
         
     def refresh(self):
         # Placeholder for refresh functionality

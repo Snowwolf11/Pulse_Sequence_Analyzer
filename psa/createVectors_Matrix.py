@@ -11,7 +11,7 @@ import numpy as np
 
 #Etwa 6 mal langsamer als matlab
 
-def createVectors_Matrix(PS, T, l, Umax, offset, inpoFact, initialVector):
+def _createVectors_Matrix(PS, T, l, Umax, offset, inpoFact, initialVector):
     #time_start = time.time()
     # Pre-allocate memory for the output matrix
     num_vectors = len(PS) + 1
