@@ -5,7 +5,7 @@ Created on Thu Feb 22 18:44:02 2024
 
 @author: leon
 """
-from psa.solve_bloch_equation import *
+from psa.old.solve_bloch_equation import *
 
 import numpy as np
 

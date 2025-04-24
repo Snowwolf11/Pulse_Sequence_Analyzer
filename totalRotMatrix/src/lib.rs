@@ -58,7 +58,7 @@ pub fn create_Rtot(
         Rtot.assign(&rotation_matrix.dot(&Rtot));
     }
 
-    Rtot
+    Rtot.reversed_axes()
 }
 
 #[allow(non_snake_case)]

@@ -4,7 +4,7 @@
 @author: leon
 """
 
-from psa.createHelix import *
+from psa.old.createHelix import *
 import numpy as np
 
 def createCoordinates_Helix(PS,T,l,Umax,offset,inpoFact,initialVector):

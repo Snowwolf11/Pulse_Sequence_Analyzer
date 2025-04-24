@@ -796,10 +796,7 @@ class MenuWindow:
         option1 = tk.Radiobutton(options_frame, text="Rotation matrices", variable=self.selected_option, value=1)
         option1.grid(row=6, column=0)
 
-        option2 = tk.Radiobutton(options_frame, text="Bloch equation", variable=self.selected_option, value=2)
-        option2.grid(row=6, column=1)
-
-        option3 = tk.Radiobutton(options_frame, text="Helices", variable=self.selected_option, value=3)
+        option3 = tk.Radiobutton(options_frame, text="Helices", variable=self.selected_option, value=2)
         option3.grid(row=6, column=2)
         
         self.selected_option.set(self.PS_analyzer.calculationMethod)

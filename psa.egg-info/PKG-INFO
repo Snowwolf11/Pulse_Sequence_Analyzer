@@ -1,0 +1,8 @@
+Metadata-Version: 2.1
+Name: psa
+Version: 1.0
+Requires-Dist: numpy
+Requires-Dist: matplotlib
+Requires-Dist: mplcursors
+Requires-Dist: mpld3
+Requires-Dist: scipy

@@ -17,6 +17,10 @@ pub fn create_vectors(
 
     m.slice_mut(s![0, ..]).assign(&(initialVector * l));
 
+    if PS.shape()[0] == 0 {
+        return m;
+    }
+
     let angle_factor = -2.0 * std::f64::consts::PI * T / inpoFact as f64;
     let offset_factor = Umax * inpoFact as f64 / 100.0;
 
@@ -53,12 +57,14 @@ pub fn create_vectors(
         });
     }
 
-    let mut vn = m.slice(s![0, ..]).to_owned();
+    let vn = m.slice(s![0, ..]).to_owned();
+    let mut accum = Array2::<f64>::eye(3);
     let iter = rotation_matrices
         .outer_iter()
         .zip(m.axis_iter_mut(Axis(0)).skip(1));
     for (rotation_matrix, mut m) in iter {
-        vn = rotation_matrix.dot(&vn);
+        accum = accum.dot(&rotation_matrix);
+        let vn = accum.dot(&vn);
         m.assign(&vn);
     }
 

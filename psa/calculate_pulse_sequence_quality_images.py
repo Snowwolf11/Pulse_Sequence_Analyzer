@@ -40,8 +40,8 @@ def calculate_pulse_sequence_quality_images(GUI, dirname, Range, T, Umax, initia
                 Q = calculate_pulse_sequence_quality(PS, T, 1, Umax, -Range / 2 + (n2 - 1) * offset, 1, np.array(initialVector), shallVec, calcType)
                 if abs(1 - Q) < 10**(-15):
                     Q = 1-10**(-15)
-                PI[n2, n1] = np.log10(abs(1 - Q))
-                #PI[n2, n1] = Q
+                #PI[n2, n1] = np.log10(abs(1-Q))
+                PI[n2, n1] = np.log10(abs(1-Q))
     #PI = mean_deviation(PI, round(Resolution*4))
     #print(Resolution)
     return PI

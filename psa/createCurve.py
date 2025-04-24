@@ -4,10 +4,11 @@
 @author: leon
 """
 from psa.createCoordinates_Matrix import *
-from psa.createCoordinates_Helix import *
+from psa.old.createCoordinates_Helix import *
 from psa.getPulseSequence import *
-from psa.createCoordinates_HelixVanDamme import *
-from psa.createCoordinates_BlochEquation import *
+from psa.old.createCoordinates_HelixVanDamme import *
+from psa.old.createCoordinates_BlochEquation import *
+from psa.createCoordiantes_HelixV2 import *
 
 from mpl_toolkits import mplot3d
 import matplotlib.pyplot as plt
@@ -48,15 +49,12 @@ def  createCurve(PulseSequence,T=0.0000005,l=1,maximumAmplitude=10000,offset=890
             PS_ori = PS
             PS=np.kron(PS, np.ones((inpoFact,1)));   #Each Element of the PS is exchanged by an itself * ones(inpoFact,1) to interpolate the Curve for better handability (it gets a better resolution)
             PS[:,0]=PS[:,0]/inpoFact;       #The Intensities of the PS get reduced by the factor inpoFact, to ensure the Curve stays the same (exept better resolution) for inpoFact≠0
+            initialVector = initialVector/np.linalg.norm(initialVector)
             #VM=createVectorMatrix_app(app,PS,T,l,maximumAmplitude, offset, inpoFact); #A Matrix which contains all the vectors gets created
             if calculationMethod == 1:
               CM=createCoordinates_Matrix(PS,T,l,maximumAmplitude, offset, inpoFact, initialVector) #A Matrix which contains the Coordinate of Points of the Curve is created
             elif(calculationMethod == 2):
-              CM = createCoordinates_BlochEquation(PS,T,l,maximumAmplitude, offset, inpoFact, initialVector)
-            elif(calculationMethod == 3):
-              #CM = createCoordinateMatrix_3_app_test(app,PS,T,l,maximumAmplitude,offset,inpoFact, initialVector); #####
-              #CM = createCoordinates_Helix(PS,T,l,maximumAmplitude,offset,inpoFact, initialVector);
-              CM = createCoordinates_HelixVanDamme(PS_ori,T,l*inpoFact/T,maximumAmplitude, offset, inpoFact, initialVector)
+              CM = createCoordinates_HelixV2(PS_ori,T,l*inpoFact/T,maximumAmplitude, offset, inpoFact, initialVector)
             else:
               raise Exception("calculation Method must be either 1 (Rotation Matrix), 2 (Helix)")
             
