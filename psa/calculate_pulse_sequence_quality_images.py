@@ -1,4 +1,5 @@
 from psa.calculate_pulse_sequence_quality import *
+from psa.calculate_curve_stability import *
 from psa.getPulseSequence import *
 
 import vectors
@@ -15,6 +16,9 @@ def calculate_pulse_sequence_quality_images(GUI, dirname, Range, T, Umax, initia
     PS_1 = np.array(getPulseSequence(os.path.join(dirname, PSnames[-1])))
     VM_1 = vectors.createVectors_Matrix(PS_1.astype(np.float64), np.float64(T), np.float64(1.0), np.float64(Umax), np.float64(0.0), 1, initialVector.astype(np.float64))
     shallVec = round_vector(VM_1[-1,:], 45)#np.array([0, 0, -1])  # Define shallVec as a numpy array
+
+    Rtot_on_res = totalRotMatrix.create_Rtot(PS_1.astype(np.float64), np.float64(T), np.float64(Umax), np.float64(0.0), 1)
+    axis, angle, err_deg, R_target = closest_canonical_rotation(Rtot_on_res, return_matrix=True)
 
     print("Original Vector:", VM_1[-1,:])
     print("Rounded Cartesian Vector:", shallVec)
@@ -37,7 +41,7 @@ def calculate_pulse_sequence_quality_images(GUI, dirname, Range, T, Umax, initia
             PS = np.array(getPulseSequence(os.path.join(dirname, PSnames[n1])))
             GUI.text_area_set(text_area = GUI.info_error_text, text_str = f"{n1 + 1} von {PSnumber}", reset_bool = 0)
             for n2 in range(offsetRes):
-                Q = calculate_pulse_sequence_quality(PS, T, 1, Umax, -Range / 2 + (n2 - 1) * offset, 1, np.array(initialVector), shallVec, calcType)
+                Q = calculate_pulse_sequence_quality(PS, T, 1, Umax, -Range / 2 + (n2 - 1) * offset, 1, np.array(initialVector), shallVec, calcType, target_Rotation = R_target.astype(np.float64))
                 if abs(1 - Q) < 10**(-15):
                     Q = 1-10**(-15)
                 #PI[n2, n1] = np.log10(abs(1-Q))

@@ -419,7 +419,7 @@ Create an Image which displays the stability of pulse sequences with increasing 
         CM, VM, PS_mat, totalRot, phi, numberOfPulses, Axy, Axz, Ayz, arc_length, curvature, torsion, integrated_curvature, integrated_torsion, integrated_absolut_torsion, avg_curvature, avg_torsion = self.update()
         #profiler = cProfile.Profile()
         #profiler.enable()
-        X,Y,Z,quality = calculate_curve_stability(PS_mat, 
+        X,Y,Z,quality, axis, angle = calculate_curve_stability(PS_mat, 
                                                   self.T, 
                                                   self.Vector_Length, 
                                                   self.maximumAmplitude, 
@@ -431,7 +431,13 @@ Create an Image which displays the stability of pulse sequences with increasing 
         self.ax5.clear()
         self.ax5.plot_surface(X, Y, Z, cmap='viridis', edgecolor='black', linewidth=0.1)
         self.canvas5.draw()
-        self.text_area_set(text_area = self.info_error_text, text_str = "Quality: " + str(quality), reset_bool = 0)
+        calc_curve_stability_str = (f"Pulse Sequence stability\n"
+	    f"Offset range: {float(self.stability_offset_range_text.get())} kHz\n"
+		f"Amplitude range: {float(self.stability_amplitude_range_text.get())} %\n"
+		f"rotation axis: {axis} \n"
+		f"rotation angle: {angle} °\n"
+        f"average quality: {quality} \n")
+        self.text_area_set(text_area = self.info_error_text, text_str = calc_curve_stability_str, reset_bool = 0)
         #stats = pstats.Stats(profiler).sort_stats('cumulative')
         #stats.print_stats()
         #print("Calculate stability function not yet fully implemented!!")
