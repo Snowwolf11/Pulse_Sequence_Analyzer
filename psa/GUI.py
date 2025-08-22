@@ -9,7 +9,7 @@ Created on Fri Feb 23 14:25:41 2024
 #most important:
 ######TODO: Jemand schicken und funktioniert einfach!!
 ######TODO: Error handling
-######TODO: plots verbessern: Achsenbeschriftung, datapoints, zoom,...!!!
+######TODO: plots verbessern: Achsenbeschriftung, datapoints, zoom,...!!! Pyvista / Pypplot?
 ######TODO: updates bei quality Images kommen erst nachdem komplett fertig gerechnet, threading for GUI?
 ######TODO: play buttons
 #not so immediate
@@ -25,6 +25,7 @@ from psa.createCurve import *
 from psa.calculate_curveData import *
 from psa.calculate_curve_stability import *
 from psa.calculate_pulse_sequence_quality_images import *
+from psa.pulse_string_to_array import *
 
 import cProfile	#just for profiling
 import pstats	#just for profiling
@@ -43,6 +44,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import mplcursors
 import os
 import mpld3
+
 
 ########################################################################
 class PulseSequenceAnalyzerApp:
@@ -321,13 +323,19 @@ Create an Image which displays the stability of pulse sequences with increasing 
         self.doc_button.grid(row=0, column = 1, padx=2, pady=10, sticky="NW")
 
         # Text Edit Field for Pulse Sequence
-        self.pulse_sequence_label = tk.Label(self.master, text="Pulse Sequence:")
-        self.pulse_sequence_label.grid(row = 1, column = 0, padx=10, pady=5)
-        self.pulse_sequence_text = tk.Entry(self.master, width=20)
+        self.pulse_sequence_input_frame = tk.Frame(self.master)
+        self.pulse_sequence_input_frame.grid(row=1, column = 0, columnspan =2, padx=5, pady=5)
+        self.pulse_sequence_input_frame.grid_rowconfigure(0, weight=1)  # Allow row 0 to expand when window is resized
+        self.pulse_sequence_input_frame.grid_rowconfigure(1, weight=1)  # Allow row 1 to expand when window is resized
+        self.pulse_sequence_label = tk.Label(self.pulse_sequence_input_frame, text="Pulse Sequence:")
+        self.pulse_sequence_label.grid(row = 0, column = 0, padx=3, pady=5)
+        self.pulse_sequence_text = tk.Entry(self.pulse_sequence_input_frame, width=45)
         self.pulse_sequence_text.insert(0, self.PS) 
-        self.pulse_sequence_text.grid(row = 1, column = 1, padx=5, pady=5, sticky = "W")
-        self.PS_browse_directory_button =  tk.Button(self.master,  text="Browse", command=self.PS_browse_file)
-        self.PS_browse_directory_button.grid(row = 1, column = 1, padx = 10, pady = 10, sticky = "E")      
+        self.pulse_sequence_text.grid(row = 1, column = 0, columnspan =2, padx=3, pady=5)
+        self.PS_browse_directory_button =  tk.Button(self.pulse_sequence_input_frame,  text="Browse", command=self.PS_browse_file)
+        self.PS_browse_directory_button.grid(row = 0, column = 1, padx = 3, pady = 10, sticky = "W")      
+        self.PS_edit_button =  tk.Button(self.pulse_sequence_input_frame,  text="Edit", command=self.edit_PS)
+        self.PS_edit_button.grid(row = 0, column = 1, padx = 3, pady = 10, sticky = "E")   
 
         # Parameter Adjustments
         self.param_frame = tk.Frame(self.master)
@@ -446,6 +454,10 @@ Create an Image which displays the stability of pulse sequences with increasing 
         if chosen_file:
             self.pulse_sequence_text.delete(0, tk.END)  # Clear any existing text
             self.pulse_sequence_text.insert(tk.END, chosen_file)
+
+    def edit_PS(self):
+        #Opens window in which one can create own Pulse sequence and edit it live
+        edit_PS_window = EditPSWindow(self.master, self)
             
     def export_browse_directory(self):
         # Open file dialog to choose directory
@@ -616,7 +628,8 @@ Create an Image which displays the stability of pulse sequences with increasing 
             return f'{formatted_value:.1f}e{magnitude}'
         else:
             return f'{formatted_value:.1f}e-{abs(magnitude)}'
-        
+    
+    
     def plot3DCurve(self, CurveX, CurveY, CurveZ, axes, canvas, Title=""):
         axes.clear()
         axes.plot3D(CurveX, CurveY, CurveZ, color='blue', linewidth=0.9)
@@ -641,7 +654,7 @@ Create an Image which displays the stability of pulse sequences with increasing 
         if self.disp_values:
            mplcursors.cursor(hover=True)
         canvas.draw()
-        
+                
     def plot2DCurve(self, CurveX, CurveY, axes, canvas, xLabel, yLabel, Title=""):
         axes.clear()
         axes.plot(CurveX, CurveY, color='blue', linewidth=0.8)
@@ -832,6 +845,46 @@ class MenuWindow:
 		
     def close_menu(self):
         self.menu_window.destroy()
+
+class EditPSWindow:
+    def __init__(self, master, PS_analyzer):
+        self.master = master
+        self.PS_analyzer = PS_analyzer
+        self.PS_edit_window = tk.Toplevel(master)
+        self.PS_edit_window.title("Edit Pulse Sequence")
+        self.PS_initial_String = "R(B1 amplitude [%], Phase [°], Duration (multiple of T sub pulse) [µs]);\nPR(B1 amplitude [%], starting Phase [°], ending Phase [°], Duration (multiple of T sub pulse) [µs]);"
+        self.PS_example_String = """R(99.1993, 134.201134, 0.5);
+R(100.0,   20, 2.5);
+R(18.0,    -160.0, 10.0);
+PR(99.1, 18.3, 115.4, 20.5);
+R(14.0, 0.0);"""
+        self.PS_array = parse_pulse_sequence(self.PS_example_String)
+
+
+        #text Edit field for storing dir of Pulse Sequence
+        self.PS_storing_dir_text_label = tk.Label(self.PS_edit_window, text="Directory Path (necessary):")
+        self.PS_storing_dir_text_label.grid(row=0, column = 0, columnspan = 1, padx=10, pady=5)
+        self.PS_storing_dir_text =  tk.Entry(self.PS_edit_window, width = 40)
+        self.PS_storing_dir_text.grid(row = 0, column= 1, columnspan = 1, sticky ="W")
+        self.PS_storing_dir_text.insert(0, "some Directory Path (e.g. /Users/leon/Desktop/Physik/Glaser/Exports)")
+
+        # PS Edit Text Area
+        self.PS_edit_text_label = tk.Label(self.PS_edit_window, text="Create and Edit a Pulse Sequence")
+        self.PS_edit_text_label.grid(row=1, column = 0, columnspan = 2, padx=10, pady=5)
+        self.PS_edit_text = scrolledtext.ScrolledText(self.PS_edit_window, width=100, height=50)
+        self.PS_edit_text.grid(row=2, column = 0, columnspan = 2, padx=10, pady=4, sticky="NSEW")
+        self.PS_edit_text.insert(1.0, self.PS_initial_String)
+
+		# Werte sichern	
+        self.plot_button = tk.Button(self.PS_edit_window, text="Plot", command=self.plot_PS)
+        self.plot_button.grid(row=3, column=1, columnspan=1, pady=10)
+        
+    def plot_PS(self):
+        self.PS_array = parse_pulse_sequence(self.PS_edit_text.get(1.0, tk.END).strip(), subpulse_dt_us = self.PS_analyzer.T*10**6)
+        np.savetxt(self.PS_storing_dir_text.get()+"/Edited_Pulse_Sequence.csv", self.PS_array, delimiter=",")
+        self.PS_analyzer.pulse_sequence_text.delete(0, tk.END)
+        self.PS_analyzer.pulse_sequence_text.insert(0, self.PS_storing_dir_text.get()+"/Edited_Pulse_Sequence.csv")
+        self.PS_analyzer.update()
         
 ########################################################################        
 def main():
