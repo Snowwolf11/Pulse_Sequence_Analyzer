@@ -9,7 +9,7 @@ import time
 
 import numpy as np
 #46.5 vs 33
-def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRange_kHz=20, stabilityCalculationMethod=1, initialVector=np.array([0,0,1])):
+def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRange_kHz=20, stabilityCalculationMethod=1, initialVector=np.array([0,0,1]), language = "Rust"):
     a = time.time()
     
     offsetRange = 1e3 * np.linspace(-offsetRange_kHz/2, offsetRange_kHz/2, 200)
@@ -25,8 +25,14 @@ def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRan
     counto = 0
     countZ = 0
     
-    VM =  vectors.createVectors_Matrix(PS.astype(np.float64),np.float64(T),np.float64(l),np.float64(Umax),np.float64(0),1,initialVector.astype(np.float64))
-    medianVec = VM[-1,:]
+    if language == "Rust":
+        VM =  vectors.createVectors_Matrix(PS.astype(np.float64),np.float64(T),np.float64(l),np.float64(Umax),np.float64(0),1,initialVector.astype(np.float64))
+        Rtot_on_res = totalRotMatrix.create_Rtot(PS.astype(np.float64), np.float64(T), np.float64(Umax), np.float64(0.0), 1)
+        medianVec = VM[-1,:]
+    elif language == "Python":
+        VM =  createVectors_Matrix_python(PS.astype(np.float64),np.float64(T),np.float64(l),np.float64(Umax),np.float64(0),1,initialVector.astype(np.float64))
+        Rtot_on_res = create_Rtot_python(PS.astype(np.float64), np.float64(T), np.float64(Umax), np.float64(0.0), 1)
+        medianVec = VM[-1]
     
     if np.linalg.norm(medianVec[2]) > 5 * (np.linalg.norm(medianVec[1]) + np.linalg.norm(medianVec[0])):
         if medianVec[2] > 0:
@@ -36,7 +42,6 @@ def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRan
     else:
         shallVec = medianVec
     
-    Rtot_on_res = totalRotMatrix.create_Rtot(PS.astype(np.float64), np.float64(T), np.float64(Umax), np.float64(0.0), 1)
     axis, angle, err_deg, R_target = closest_canonical_rotation(Rtot_on_res, return_matrix=True)
 
     if stabilityCalculationMethod == 1: #app.SSButton.Value == 1:	#################################
@@ -46,7 +51,7 @@ def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRan
                 counto += 1
                 if counto > len(offsetRange):
                     counto = 1
-                Z[j,i] = calculate_pulse_sequence_quality(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(n), np.float64(n2), 1, initialVector.astype(np.float64), shallVec.astype(np.float64), 1)
+                Z[j,i] = calculate_pulse_sequence_quality(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(n), np.float64(n2), 1, initialVector.astype(np.float64), shallVec.astype(np.float64), 1, language=language)
                 countZ += Z[j, i]
     
     if stabilityCalculationMethod == 2: #app.URButton.Value == 1:	###############################
@@ -56,7 +61,7 @@ def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRan
                 counto += 1
                 if counto > len(offsetRange):
                     counto = 1
-                Z[j,i] = calculate_pulse_sequence_quality(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(n), np.float64(n2), 1, initialVector.astype(np.float64), shallVec.astype(np.float64), 2, target_Rotation = R_target.astype(np.float64))
+                Z[j,i] = calculate_pulse_sequence_quality(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(n), np.float64(n2), 1, initialVector.astype(np.float64), shallVec.astype(np.float64), 2, target_Rotation = R_target.astype(np.float64), language=language)
                 countZ += Z[j, i]
                 
                 #(Rtot*ex
@@ -68,8 +73,12 @@ def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRan
                 counto += 1
                 if counto > len(offsetRange):
                     counto = 1
-                VM = vectors.createVectors_Matrix(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(n), np.float64(n2), 1, initialVector.astype(np.float64))
-                Z[j, i] = np.arctan2(np.sqrt(VM[-1,0]**2 + VM[-1,1]**2), VM[-1,2]) * 180 / np.pi
+                if language == "Rust":
+                    VM = vectors.createVectors_Matrix(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(n), np.float64(n2), 1, initialVector.astype(np.float64))
+                    Z[j, i] = np.arctan2(np.sqrt(VM[-1,0]**2 + VM[-1,1]**2), VM[-1,2]) * 180 / np.pi
+                elif language == "Python":
+                    VM = createVectors_Matrix_python(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(n), np.float64(n2), 1, initialVector.astype(np.float64))
+                    Z[j, i] = np.arctan2(np.sqrt(VM[-1][0]**2 + VM[-1][1]**2), VM[-1][2]) * 180 / np.pi
                 countZ += Z[j, i]
     
     quality = countZ / (counto * counts)

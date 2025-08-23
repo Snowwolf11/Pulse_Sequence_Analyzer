@@ -1,6 +1,6 @@
 import numpy as np
 
-def _calculate_Rtot(PS, T, Umax, offset, inpoFact):
+def create_Rtot_python(PS, T, Umax, offset, inpoFact):
     Rtot = np.eye(3)  # Rotation Matrix is created
     
     for i,v in enumerate(PS): 
@@ -24,3 +24,4 @@ def _calculate_Rtot(PS, T, Umax, offset, inpoFact):
         Rtot = np.dot(Rtot, Rn)  # Total rotation Matrix for the i'th vector is created
     
     return Rtot
+

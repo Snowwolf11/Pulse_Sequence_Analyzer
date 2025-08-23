@@ -11,6 +11,50 @@ import numpy as np
 
 #Etwa 6 mal langsamer als matlab
 
+def createVectors_Matrix_python(PS, T, l, Umax, offset, inpoFact, initialVector):
+    #time_start = time.time()
+    # Pre-allocate memory for the output matrix
+    num_vectors = len(PS) + 1
+
+    R0 = [np.eye(3)]  # Initialize R0 with identity matrix for R0^{(0)}
+
+    # Pre-calculate constants
+    angle_factor = 2 * np.pi * T / inpoFact
+    Umax_factor = Umax * inpoFact / 100
+
+    for i, v in enumerate(PS):
+        Ux = v[0] * Umax_factor * np.cos(np.radians(v[1]))
+        Uy = v[0] * Umax_factor * np.sin(np.radians(v[1]))
+        Uz = offset
+
+        n = np.array([Ux, Uy, Uz])
+
+        norm_n = np.linalg.norm(n)
+        if norm_n != 0:
+            n /= norm_n
+            cosa = np.cos(angle_factor * norm_n)
+            sina = np.sin(angle_factor * norm_n)
+            mcosa = 1 - cosa
+            Rn = np.array([[n[0]**2 * mcosa + cosa, n[0] * n[1] * mcosa - n[2] * sina, n[0] * n[2] * mcosa + n[1] * sina],
+                           [n[0] * n[1] * mcosa + n[2] * sina, n[1]**2 * mcosa + cosa, n[1] * n[2] * mcosa - n[0] * sina],
+                           [n[2] * n[0] * mcosa - n[1] * sina, n[2] * n[1] * mcosa + n[0] * sina, n[2]**2 * mcosa + cosa]])
+        else:
+            Rn = np.eye(3)
+
+        R0.append(Rn)
+
+    # Step 2: Calculate R_k := R_0^{(k)} ... R_0^{(0)} for k = 1,...,N
+    R_k = [R0[0]]  # Start with R0^{(0)} = Identity
+    for k in range(1, num_vectors):
+        R_k.append(np.dot(R0[k], R_k[k-1]))
+    
+    # Step 3: Calculate \dot{r}_k := R_k^T \cdot \hat{e}_z for k = 0,...,N
+    r_dot = [np.dot(R.T, l * initialVector) for R in R_k]
+        
+    #time_end = time.time()
+    #print("Ellapsed time: " + str(time_end-time_start))
+    return r_dot
+
 def _createVectors_Matrix(PS, T, l, Umax, offset, inpoFact, initialVector):
     #time_start = time.time()
     # Pre-allocate memory for the output matrix

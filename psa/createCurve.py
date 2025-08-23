@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def  createCurve(PulseSequence,T=0.0000005,l=1,maximumAmplitude=10000,offset=8900, inpoFact=8,xExpand=0, calculationMethod=1, initialVector=np.array([0,0,1])):
+def  createCurve(PulseSequence,T=0.0000005,l=1,maximumAmplitude=10000,offset=8900, inpoFact=8,xExpand=0, calculationMethod=1, initialVector=np.array([0,0,1]), language = "Rust"):
             #print("offset: ", offset)
             #print("maxAmpl: ", maximumAmplitude)
             #createCurve creates a Curve from a raw pulse Sequence
@@ -52,7 +52,7 @@ def  createCurve(PulseSequence,T=0.0000005,l=1,maximumAmplitude=10000,offset=890
             initialVector = initialVector/np.linalg.norm(initialVector)
             #VM=createVectorMatrix_app(app,PS,T,l,maximumAmplitude, offset, inpoFact); #A Matrix which contains all the vectors gets created
             if calculationMethod == 1:
-              CM=createCoordinates_Matrix(PS,T,l,maximumAmplitude, offset, inpoFact, initialVector) #A Matrix which contains the Coordinate of Points of the Curve is created
+              CM=createCoordinates_Matrix(PS,T,l,maximumAmplitude, offset, inpoFact, initialVector, language=language) #A Matrix which contains the Coordinate of Points of the Curve is created
             elif(calculationMethod == 2):
               CM = createCoordinates_HelixV2(PS_ori,T,l*inpoFact/T,maximumAmplitude, offset, inpoFact, initialVector)
             else:

@@ -108,6 +108,8 @@ Create an Image which displays the stability of pulse sequences with increasing 
         self.qualityImages_export_count = 0
         self.play_amplitude_bool = False
         self.play_offset_bool = False
+
+        self.calculation_language = "Rust" #"Rust or Python"
         
         np.set_printoptions(threshold=np.inf)
                
@@ -426,7 +428,8 @@ Create an Image which displays the stability of pulse sequences with increasing 
                                                   scalingRange_percent=float(self.stability_amplitude_range_text.get()), 
 												  offsetRange_kHz=float(self.stability_offset_range_text.get()), 
                                                   stabilityCalculationMethod = int(self.selected_stability_option.get()), 
-												  initialVector = self.initialVector)
+												  initialVector = self.initialVector,
+                                                  language=self.calculation_language)
         #profiler.disable()
         self.ax5.clear()
         self.ax5.plot_surface(X, Y, Z, cmap='viridis', edgecolor='black', linewidth=0.1)
@@ -498,7 +501,8 @@ Create an Image which displays the stability of pulse sequences with increasing 
                                                        self.initialVector, 
 													   int(self.selected_qualityImages_calcType.get()), 
                                                        int(self.selected_qualityImages_changingVariable.get()),
-													   float(self.qualityImages_Resolution_text.get()))
+													   float(self.qualityImages_Resolution_text.get()),
+                                                       language=self.calculation_language)
         while os.path.exists(self.qualityImages_output_dir_text.get()+"/QualityImage"+str(self.export_count)):
             self.export_count += 1
         os.mkdir(self.qualityImages_output_dir_text.get()+"/QualityImage"+str(self.export_count))
@@ -748,7 +752,7 @@ Create an Image which displays the stability of pulse sequences with increasing 
         #print(self.disp_values)
         self.update_count += 1
         self.updateValues()
-        CM, VM, PS_mat = createCurve(PulseSequence=self.PS,T=self.T,l=self.Vector_Length,maximumAmplitude = self.maximumAmplitude,offset = self.Offset, inpoFact = self.InpoFact, xExpand = self.x_Expand, calculationMethod=self.calculationMethod, initialVector=self.initialVector)
+        CM, VM, PS_mat = createCurve(PulseSequence=self.PS,T=self.T,l=self.Vector_Length,maximumAmplitude = self.maximumAmplitude,offset = self.Offset, inpoFact = self.InpoFact, xExpand = self.x_Expand, calculationMethod=self.calculationMethod, initialVector=self.initialVector, language=self.calculation_language)
         self.plot3DCurve(CurveX = CM[:,0]+np.linspace(0,self.x_Expand,np.shape(CM)[0]).transpose(), CurveY = CM[:,1], CurveZ = CM[:,2], axes=self.ax1, canvas = self.canvas1, Title="AHT-Kurve")
         self.plot3DCurve(CurveX = VM[:,0], CurveY = VM[:,1], CurveZ = VM[:,2], axes=self.ax2, canvas = self.canvas2, Title="Trajectory")
         totalRot = angle_between_vectors(VM[0,:], VM[-1,:])
@@ -820,21 +824,37 @@ class MenuWindow:
         
         self.selected_option.set(self.PS_analyzer.calculationMethod)
 
+        # Radiobuttons mit language
+        self.label_calc_language = tk.Label(self.menu_window, text="Calculation Language:")
+        self.label_calc_language.grid(row=7, column=0)
+        
+        self.selected_language = tk.StringVar()
+        language_frame = tk.Frame(self.menu_window)
+        language_frame.grid(row=8, column=0, columnspan=2)
+
+        language1 = tk.Radiobutton(language_frame, text="Rust", variable=self.selected_language, value="Rust")
+        language1.grid(row=8, column=0)
+
+        language2 = tk.Radiobutton(language_frame, text="Python", variable=self.selected_language, value="Python")
+        language2.grid(row=8, column=2)
+        
+        self.selected_language.set(self.PS_analyzer.calculation_language)
+
 		# Checkbox for Display values
         self.display_values_checkbox = tk.Checkbutton(self.menu_window, text="Display values", variable=self.disp_values)
-        self.display_values_checkbox.grid(row=7, column=0, columnspan=2)
+        self.display_values_checkbox.grid(row=9, column=0, columnspan=2)
 
 		# Werte sichern	
         self.save_button = tk.Button(self.menu_window, text="save", command=self.save_menu)
-        self.save_button.grid(row=8, column=0, columnspan=2, pady=10)
+        self.save_button.grid(row=10, column=0, columnspan=2, pady=10)
         
         # Schließen des Menüfensters
         self.close_button = tk.Button(self.menu_window, text="Close", command=self.close_menu)
-        self.close_button.grid(row=8, column=2, columnspan=2, pady=10)
+        self.close_button.grid(row=10, column=2, columnspan=2, pady=10)
 		
 		#reset the app to initial values
         self.reset_button = tk.Button(self.menu_window, text="Reset Analyzer", command=self.reset_analyzer)
-        self.reset_button.grid(row=7, column=2, columnspan=1, pady=5)
+        self.reset_button.grid(row=9, column=2, columnspan=1, pady=5)
 
     def reset_analyzer(self):
         # Reinitialize the PulseSequenceAnalyzer object
@@ -845,6 +865,8 @@ class MenuWindow:
         self.PS_analyzer.initialVector = np.array([float(self.entry_x_initial.get()), float(self.entry_y_initial.get()), float(self.entry_z_initial.get())])
         selected_option = self.selected_option.get()
         self.PS_analyzer.calculationMethod = int(selected_option)
+        selected_language = self.selected_language.get()
+        self.PS_analyzer.calculation_language = selected_language
         #print(self.disp_values)
         self.PS_analyzer.disp_values = self.disp_values.get()
         self.menu_window.destroy()
