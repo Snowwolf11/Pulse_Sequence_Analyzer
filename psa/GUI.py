@@ -76,29 +76,81 @@ class PulseSequenceAnalyzerApp:
         self.calculationMethod = 1
         self.initialVector = np.array([0,0,1])
         
-        self.documentation_str = """Documentation:
-Start window:
-Insert complete path of pulse sequence (e.g. /Users/leon/Documents/MATLAB/Pulssequenzen/BIBOP_sorted_20kHz_noB1_rf10kHz/pulse0015.bruker)
- and the correct parameter values into the edit fields to the left. Press refresh to load the AHT-Curve, its Curvature, Torsion and the Path (projectory of the vector end). Use the Sliders or the associated edit fields to change the offset or the pulse Amplitude and click play to automatically change the value.
-Menu:
-choose the desired calculation Method and the initial Condition (Bloch Vector)
-Curve Window:
-Plot of the AHT-Curve and its xy-plane projection. Updates through pressing the refresh or  play button or changing the offset or scaling value.
-Curvature Window:
-Plot of the Curvature along the Curve. Updates through pressing the refresh or play button or changing the offset or scaling value.
-Torsion Window:
-Plot of the Torsion along the Curve. Updates through pressing the refresh or play button or changing the offset or scaling value. The Torsion plot is only accurate for inpoFact = 1.
-Path Window:
-Plot of the Trajectory of the Vector Ends. Updates through pressing the refresh or play button or changing the offset or scaling value.
-Stability window:
-Select if the pulse sequence is a state to state or an universal rotation pulse. Then choose the offset range (in kHz, 0kHz is in center; e.g. 20kHz->-10kHz - 10kHz)   and pulse amplitude range (in %, 100 is in center; e.g. 20%->90% - 110%)  and click calculate. The plot displays the accuracy/quality (/rotation angle if angle is selected) of the pulse sequence as function of the offset and amplitude.
-PS Window:
-Displays pulse sequence as text or as plot.
-Options Window:
-1.Animation
-Animate a video of AHT-Curves with offset or pulse amplitude as changing parameter in .avi format. Insert a complete path as saving location (e.g. /Users/leon/Documents/MATLAB/PulseImages/001)
-2.createQualityImages
-Create an Image which displays the stability of pulse sequences with increasing lengths in dependence of the offset per color coding. To do so insert the path of the folder which contains the pulse sequences into the directory field and the name the Image shall be saved under in the 'save under' field. After the Image is calculated it will also open in a figure, which can also be saved. The parameter Offset Range defines in which Offset Range (in kHz, 0kHz is in center; e.g. 20kHz->-10kHz - 10kHz) the curve quality shall be calculated. The field 'class' sets if the pulses are UR or SS pulses. Resolution sets how many pixels per kHz Range per pulse shall be calculated. Pulse Angle isn't yet functional. The calculate Image feature till now just works with all State to State pulses and 0° /360° UR pulses. With the default settings calculating an Image from a folder with 150 pulse sequences can take up to half an hour."""
+        self.documentation_str = """Documentation
+
+Overview
+This app computes and visualizes error curves for NMR pulse sequences using the space-curve quantum control formalism. It can also evaluate fidelities and related metrics.
+
+Main Window
+- Load pulse sequence:
+  • Enter the full file path (e.g., /Users/leon/Documents/MATLAB/Pulssequenzen/BIBOP_sorted_20kHz_noB1_rf10kHz/pulse0015.bruker), or click **Browse**.
+- Pulse parameters:
+  • Set sub-pulse duration and other parameters in the fields on the left.
+- Controls:
+  • Press **Refresh** (or hit **Enter**) to recompute the Error Curve, Curvature, Torsion, and Path (trajectory of the vector tip).
+  • Adjust **Offset** (kHz) and **Amplitude** (%) via sliders or their input fields.
+- Displays:
+  • **Curve Data**: numerical summaries for the current sequence and its error curve.
+  • **Info & Errors**: status messages and diagnostics.
+- Shortcuts:
+  • **Edit** opens the Pulse Sequence Editor.
+  • **Menu** opens global settings.
+
+Edit Window
+Define a pulse sequence as a list of rectangular pulses and phase ramps, using the format shown in the editor when it opens. Choose a target directory; the defined sequence will be saved there. Use **Plot** to visualize the sequence in the Curve Window. Calculations use the pulse parameters from the Main Window.
+
+Menu / Settings
+- Calculation method: **Rotation Matrix** or **Helix**.
+- Initial condition: select the **error direction**.
+- Backend / language:
+  • **Rust** — much faster but requires additional setup.
+  • **Python** — runs out of the box but is slower.
+
+Error-Curve Window
+Plots the Error curve. Updates when you press **Refresh**, hit **Enter**, or change Offset/Amplitude.
+
+Trajectory Window
+Plots the trajectory of the vector tip (the first derivative of the curve). Updates on **Refresh**, **Enter**, or Offset/Amplitude changes.
+
+Curvature Window
+Plots curvature along the curve. Updates on **Refresh**, **Enter**, or Offset/Amplitude changes.
+
+Torsion Window
+Plots torsion along the curve. Updates on **Refresh**, **Enter**, or Offset/Amplitude changes.
+Note: torsion is only accurate when `inpoFact = 1`.
+
+Stability Window
+- Choose pulse type: **State-to-State (SS)** or **Universal Rotation (UR)**.
+- Set ranges:
+  • **Offset range** in kHz (0 kHz is center; e.g., 20 kHz → −10 kHz … +10 kHz).
+  • **Amplitude range** in % (100% is center; e.g., 20% → 90% … 110%).
+- Click **Calculate** to plot fidelity (or rotation angle if **Angle** is selected) vs. offset and amplitude.
+- Note: with the Python backend, this computation can take several minutes.
+
+PS Window
+Shows the pulse sequence as plain text.
+
+Options Window
+
+1) Export Data
+- **Export Data**: writes analysis for the sequence specified to the right of the button into a newly created directory:
+  • CSV: curve, first derivative, curvature, torsion
+  • TXT: additional metadata and settings
+- **Export Dir Data**: performs the same export for all pulse files in the sequence’s directory, creating one subdirectory per sequence.
+
+2) Create Quality Images
+Generates a heatmap image of infidelity vs. offset for sequences of increasing length.
+- **Input directory**: folder containing the pulse sequences.
+- **Output directory**: where to save the generated image.
+- **Offset Range** (kHz): evaluation window (0 kHz is center; e.g., 20 kHz → −10 kHz … +10 kHz).
+- **Class**: UR or SS.
+- **Resolution**: pixels per kHz per pulse.
+Note: with default settings and ~150 sequences, the Python backend may require several minutes or more.
+
+Tips
+- Press **Enter** in any numeric field to recompute quickly.
+"""
+
 
         self.user_interaction = False
         self.disp_values = False       
@@ -133,7 +185,7 @@ Create an Image which displays the stability of pulse sequences with increasing 
         self.ax1.set_zlabel('Z', fontsize=8)
         self.canvas1 = FigureCanvasTkAgg(self.fig1, master=self.tabControl)
         self.canvas1.get_tk_widget().grid(row = 0, column = 0,sticky="NSEW")
-        self.tabControl.add(self.canvas1.get_tk_widget(), text ='AHT-Curve') 
+        self.tabControl.add(self.canvas1.get_tk_widget(), text ='Error-Curve') 
         
         # Axes for plotting Trajectory
         self.fig2 = plt.figure(figsize=(5, 3))
@@ -579,26 +631,26 @@ Create an Image which displays the stability of pulse sequences with increasing 
 		f"Integrated abs Torsion= {integrated_absolut_torsion};")
         if(type == 0):
             os.mkdir(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count))
-            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/AHT_Curve.csv", CM, delimiter=",")
+            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Error_Curve.csv", CM, delimiter=",")
             np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Trajectory_Curve.csv", VM, delimiter=",")
             np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Pulse_Sequence.csv", PS_mat, delimiter=",")
             np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/curvature-arc_length.csv", np.column_stack((arc_length, curvature)), delimiter=",")
             np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/torsion-arc_length.csv", np.column_stack((arc_length, torsion)), delimiter=",")
             with open(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Curve_data.txt", 'w') as file:
                 file.write(export_string)
-            mpld3.save_html(self.fig1, self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/AHT_Curve_plot.html")	#######TODO
+            mpld3.save_html(self.fig1, self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Error_Curve_plot.html")	#######TODO
             export_data_interface_str = "data exported to: "+  self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_count)
             self.text_area_set(text_area = self.info_error_text, text_str = export_data_interface_str, reset_bool = 0)
         if(type == 1):
             os.mkdir(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str)
-            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/AHT_Curve.csv", CM, delimiter=",")
+            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/Error_Curve.csv", CM, delimiter=",")
             np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/Trajectory_Curve.csv", VM, delimiter=",")
             np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/Pulse_Sequence.csv", PS_mat, delimiter=",")
             np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/curvature-arc_length.csv", np.column_stack((arc_length, curvature)), delimiter=",")
             np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/torsion-arc_length.csv", np.column_stack((arc_length, torsion)), delimiter=",")
             with open(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/Curve_data.txt", 'w') as file:
                 file.write(export_string)
-            mpld3.save_html(self.fig1, self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/AHT_Curve_plot.html")	#######TODO
+            mpld3.save_html(self.fig1, self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/Error_Curve_plot.html")	#######TODO
             export_data_interface_str = "data exported to: "+  self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str
             self.text_area_set(text_area = self.info_error_text, text_str = export_data_interface_str, reset_bool = 0)
         
@@ -753,7 +805,7 @@ Create an Image which displays the stability of pulse sequences with increasing 
         self.update_count += 1
         self.updateValues()
         CM, VM, PS_mat = createCurve(PulseSequence=self.PS,T=self.T,l=self.Vector_Length,maximumAmplitude = self.maximumAmplitude,offset = self.Offset, inpoFact = self.InpoFact, xExpand = self.x_Expand, calculationMethod=self.calculationMethod, initialVector=self.initialVector, language=self.calculation_language)
-        self.plot3DCurve(CurveX = CM[:,0]+np.linspace(0,self.x_Expand,np.shape(CM)[0]).transpose(), CurveY = CM[:,1], CurveZ = CM[:,2], axes=self.ax1, canvas = self.canvas1, Title="AHT-Kurve")
+        self.plot3DCurve(CurveX = CM[:,0]+np.linspace(0,self.x_Expand,np.shape(CM)[0]).transpose(), CurveY = CM[:,1], CurveZ = CM[:,2], axes=self.ax1, canvas = self.canvas1, Title="Error-Kurve")
         self.plot3DCurve(CurveX = VM[:,0], CurveY = VM[:,1], CurveZ = VM[:,2], axes=self.ax2, canvas = self.canvas2, Title="Trajectory")
         totalRot = angle_between_vectors(VM[0,:], VM[-1,:])
         phi = angle_with_x_axis(VM[-1,:])
@@ -880,7 +932,7 @@ class EditPSWindow:
         self.PS_analyzer = PS_analyzer
         self.PS_edit_window = tk.Toplevel(master)
         self.PS_edit_window.title("Edit Pulse Sequence")
-        self.PS_initial_String = "R(B1 amplitude [%], Phase [°], Duration (multiple of T sub pulse) [µs]);\nPR(B1 amplitude [%], starting Phase [°], ending Phase [°], Duration (multiple of T sub pulse) [µs]);"
+        self.PS_initial_String = "R(B1 amplitude [%], Phase [°], Duration (multiple of T sub pulse) [µs]);\nPR(B1 amplitude [%], starting Phase [°], ending Phase [°], Duration (multiple of T sub pulse) [µs]); eg:\nPR(100, 0, 360, 90);\nP(99.6, 180, 50.5);\nP(100, 0.1, 60);"
         self.PS_example_String = """R(99.1993, 134.201134, 0.5);
 R(100.0,   20, 2.5);
 R(18.0,    -160.0, 10.0);
