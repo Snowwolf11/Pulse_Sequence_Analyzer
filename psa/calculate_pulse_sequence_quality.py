@@ -35,7 +35,7 @@ def calculate_pulse_sequence_quality(PS, T, l, Umax, off, inpoFact=1 , initialVe
          Rtot = create_Rtot_python(PS.astype(np.float64), np.float64(T), np.float64(Umax), np.float64(off), 1)
        Q = 1/3 * (np.dot(Rtot[:,0], [1, 0, 0]) + np.dot(Rtot[:,1], [0, 1, 0]) + np.dot(Rtot[:,2], [0, 0, 1]))  # for 0° & 360° Pulse
        Q = np.trace(target_Rotation.T @ Rtot) / 3.0
-       F =  (1+Q)/2 #so that resulting fidelity is in the range 0-1.  
+       F = (1+Q)/2  
     
     elif calcType == 3:  #geschlossenheit
        CM = createCoordinates_Matrix(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(Umax), np.float64(off), 1, initialVector.astype(np.float64), language=language)

@@ -21,10 +21,19 @@ Created on Fri Feb 23 14:25:41 2024
 ######TODO: UR stability plot only for 0° & 360° Pulse !!!
 
 
-from psa.createCurve import *
-from psa.calculate_curveData import *
-from psa.calculate_curve_stability import *
-from psa.calculate_pulse_sequence_quality_images import *
+from psa.app_backend import (
+    AnalyzerParams,
+    analyze_pulse_sequence,
+    StabilityParams,
+    calculate_stability_backend,
+    QualityImageParams,
+    calculate_quality_image_backend,
+    build_curve_data_export_string,
+    write_analysis_export,
+)
+from psa.documentation import DOCUMENTATION_STR
+from psa.app_config import DEFAULTS, get_default_initial_vector
+
 from psa.pulse_string_to_array import *
 
 import cProfile	#just for profiling
@@ -65,91 +74,18 @@ class PulseSequenceAnalyzerApp:
         self.master.grid_columnconfigure(1, weight=2)  # Allow column 1 to expand when window is resized
         self.master.grid_columnconfigure(2, weight=2)  # Allow column 2 to expand when window is resized
         
-        self.PS = "/Users/leon/Desktop/Physik/Glaser/Analyse_und_Visualisierung_von_robusten_Kontrollpulsen/Pulssequenzen/UR_Pulse/UR36020kHz_30B1_rf10kHz/pulse1000.bruker"
-        self.maximumAmplitude = 10000.0
-        self.Vector_Length = 1.0
-        self.T = 0.5
-        self.InpoFact = 5
-        self.x_Expand = 0.0
-        self.Offset = 0.0
-        self.Scaling = 100.0
-        self.calculationMethod = 1
-        self.initialVector = np.array([0,0,1])
+        self.PS = DEFAULTS.pulse_sequence
+        self.maximumAmplitude = DEFAULTS.maximum_amplitude_hz
+        self.Vector_Length = DEFAULTS.vector_length
+        self.T = DEFAULTS.time_per_pulse_s
+        self.InpoFact = DEFAULTS.inpo_fact
+        self.x_Expand = DEFAULTS.x_expand
+        self.Offset = DEFAULTS.offset_hz
+        self.Scaling = DEFAULTS.scaling_percent
+        self.calculationMethod = DEFAULTS.calculation_method
+        self.initialVector = get_default_initial_vector()
         
-        self.documentation_str = """Documentation
-
-Overview
-This app computes and visualizes error curves for NMR pulse sequences using the space-curve quantum control formalism. It can also evaluate fidelities and related metrics.
-
-Main Window
-- Load pulse sequence:
-  • Enter the full file path (e.g., /Users/leon/Documents/MATLAB/Pulssequenzen/BIBOP_sorted_20kHz_noB1_rf10kHz/pulse0015.bruker), or click **Browse**.
-- Pulse parameters:
-  • Set sub-pulse duration and other parameters in the fields on the left.
-- Controls:
-  • Press **Refresh** (or hit **Enter**) to recompute the Error Curve, Curvature, Torsion, and Path (trajectory of the vector tip).
-  • Adjust **Offset** (kHz) and **Amplitude** (%) via sliders or their input fields.
-- Displays:
-  • **Curve Data**: numerical summaries for the current sequence and its error curve.
-  • **Info & Errors**: status messages and diagnostics.
-- Shortcuts:
-  • **Edit** opens the Pulse Sequence Editor.
-  • **Menu** opens global settings.
-
-Edit Window
-Define a pulse sequence as a list of rectangular pulses and phase ramps, using the format shown in the editor when it opens. Choose a target directory; the defined sequence will be saved there. Use **Plot** to visualize the sequence in the Curve Window. Calculations use the pulse parameters from the Main Window.
-
-Menu / Settings
-- Calculation method: **Rotation Matrix** or **Helix**.
-- Initial condition: select the **error direction**.
-- Backend / language:
-  • **Rust** — much faster but requires additional setup.
-  • **Python** — runs out of the box but is slower.
-
-Error-Curve Window
-Plots the Error curve. Updates when you press **Refresh**, hit **Enter**, or change Offset/Amplitude.
-
-Trajectory Window
-Plots the trajectory of the vector tip (the first derivative of the curve). Updates on **Refresh**, **Enter**, or Offset/Amplitude changes.
-
-Curvature Window
-Plots curvature along the curve. Updates on **Refresh**, **Enter**, or Offset/Amplitude changes.
-
-Torsion Window
-Plots torsion along the curve. Updates on **Refresh**, **Enter**, or Offset/Amplitude changes.
-Note: torsion is only accurate when `inpoFact = 1`.
-
-Stability Window
-- Choose pulse type: **State-to-State (SS)** or **Universal Rotation (UR)**.
-- Set ranges:
-  • **Offset range** in kHz (0 kHz is center; e.g., 20 kHz → −10 kHz … +10 kHz).
-  • **Amplitude range** in % (100% is center; e.g., 20% → 90% … 110%).
-- Click **Calculate** to plot fidelity (or rotation angle if **Angle** is selected) vs. offset and amplitude.
-- Note: with the Python backend, this computation can take several minutes.
-
-PS Window
-Shows the pulse sequence as plain text.
-
-Options Window
-
-1) Export Data
-- **Export Data**: writes analysis for the sequence specified to the right of the button into a newly created directory:
-  • CSV: curve, first derivative, curvature, torsion
-  • TXT: additional metadata and settings
-- **Export Dir Data**: performs the same export for all pulse files in the sequence’s directory, creating one subdirectory per sequence.
-
-2) Create Quality Images
-Generates a heatmap image of infidelity vs. offset for sequences of increasing length.
-- **Input directory**: folder containing the pulse sequences.
-- **Output directory**: where to save the generated image.
-- **Offset Range** (kHz): evaluation window (0 kHz is center; e.g., 20 kHz → −10 kHz … +10 kHz).
-- **Class**: UR or SS.
-- **Resolution**: pixels per kHz per pulse.
-Note: with default settings and ~150 sequences, the Python backend may require several minutes or more.
-
-Tips
-- Press **Enter** in any numeric field to recompute quickly.
-"""
+        self.documentation_str = DOCUMENTATION_STR
 
 
         self.user_interaction = False
@@ -161,7 +97,7 @@ Tips
         self.play_amplitude_bool = False
         self.play_offset_bool = False
 
-        self.calculation_language = "Rust" #"Rust or Python"
+        self.calculation_language = DEFAULTS.calculation_language #"Rust or Python"
         
         np.set_printoptions(threshold=np.inf)
                
@@ -296,7 +232,7 @@ Tips
         self.export_data_path_label.grid(row = 1, column = 0, padx = 10, pady = 10)
         self.export_data_path_text =  tk.Entry(self.options_frame, width = 40)
         self.export_data_path_text.grid(row = 1, column= 1, padx = 10, pady = 10)
-        self.export_data_path_text.insert(0, "/Users/leon/Desktop/Physik/Glaser")
+        self.export_data_path_text.insert(0, DEFAULTS.export_directory)
         self.export_browse_directory_button =  tk.Button(self.options_frame,  text="Browse", command=self.export_browse_directory)
         self.export_browse_directory_button.grid(row = 1, column = 2, padx = 10, pady = 10)
         self.export_data_path_button =  tk.Button(self.options_frame,  text="Export Data", command=self.export_data_interface)
@@ -354,14 +290,14 @@ Tips
         self.qualityImages_input_dir_label.grid(row = 6, column = 0, sticky = "E")
         self.qualityImages_input_dir_text =  tk.Entry(self.options_frame, width = 40)
         self.qualityImages_input_dir_text.grid(row = 6, column= 1, columnspan = 2, sticky ="W")
-        self.qualityImages_input_dir_text.insert(0, "/Users/leon/Desktop/Physik/Glaser/Analyse_und_Visualisierung_von_robusten_Kontrollpulsen/Pulssequenzen/UR_Pulse/UR_ohne_B1_robustness_20_kHz/UR360_20kHz_noB1_rf10kHz(new_loop_sorted)")
+        self.qualityImages_input_dir_text.insert(0, DEFAULTS.quality_input_directory)
         self.qualityImages_input_dir_button =  tk.Button(self.options_frame,  text="Browse", command=self.qualityImages_input_browse_directory)
         self.qualityImages_input_dir_button.grid(row = 6, column = 2)        
         self.qualityImages_output_dir_label = tk.Label(self.options_frame, text="Output Directory:")
         self.qualityImages_output_dir_label.grid(row = 7, column = 0, sticky = "E")
         self.qualityImages_output_dir_text =  tk.Entry(self.options_frame, width = 40)
         self.qualityImages_output_dir_text.grid(row = 7, column= 1, columnspan = 2, sticky ="W")
-        self.qualityImages_output_dir_text.insert(0, "/Users/leon/Desktop/Physik/Glaser/Bachelor_Thesis/images/Quality images")
+        self.qualityImages_output_dir_text.insert(0, DEFAULTS.quality_output_directory)
         self.qualityImages_output_dir_button =  tk.Button(self.options_frame,  text="Browse", command=self.qualityImages_output_browse_directory)
         self.qualityImages_output_dir_button.grid(row = 7, column = 2)   
 			# calculate Button
@@ -457,6 +393,21 @@ Tips
     def open_menu(self):
         menu_window = MenuWindow(self.master, self)
 
+    def get_analyzer_params_from_gui(self):
+        return AnalyzerParams(
+            pulse_sequence=self.pulse_sequence_text.get(),
+            pulse_amplitude_khz=float(self.param_entries[0].get()),
+            vector_length=float(self.param_entries[1].get()),
+            time_per_pulse_us=float(self.param_entries[2].get()),
+            inpo_fact=int(self.param_entries[3].get()),
+            x_expand=float(self.param_entries[4].get()),
+            offset_khz=float(self.param_entries[5].get()),
+            scaling_percent=float(self.param_entries[6].get()),
+            calculation_method=self.calculationMethod,
+            initial_vector=self.initialVector,
+            calculation_language=self.calculation_language,
+        )
+
     def play_amplitude(self):
         self.play_amplitude_bool = not self.play_amplitude_bool
         print("Not implemeted")
@@ -468,34 +419,61 @@ Tips
         print("Not implemeted")
 
     def calculate_stability(self):
-        self.param_entries[3].delete(0,1000)
-        self.param_entries[3].insert(0,"1")
-        CM, VM, PS_mat, totalRot, phi, numberOfPulses, Axy, Axz, Ayz, arc_length, curvature, torsion, integrated_curvature, integrated_torsion, integrated_absolut_torsion, avg_curvature, avg_torsion = self.update()
-        #profiler = cProfile.Profile()
-        #profiler.enable()
-        X,Y,Z,quality, axis, angle = calculate_curve_stability(PS_mat, 
-                                                  self.T, 
-                                                  self.Vector_Length, 
-                                                  self.maximumAmplitude, 
-                                                  scalingRange_percent=float(self.stability_amplitude_range_text.get()), 
-												  offsetRange_kHz=float(self.stability_offset_range_text.get()), 
-                                                  stabilityCalculationMethod = int(self.selected_stability_option.get()), 
-												  initialVector = self.initialVector,
-                                                  language=self.calculation_language)
-        #profiler.disable()
+        self.param_entries[3].delete(0, 1000)
+        self.param_entries[3].insert(0, "1")
+
+        (
+            CM,
+            VM,
+            PS_mat,
+            totalRot,
+            phi,
+            numberOfPulses,
+            Axy,
+            Axz,
+            Ayz,
+            arc_length,
+            curvature,
+            torsion,
+            integrated_curvature,
+            integrated_torsion,
+            integrated_absolut_torsion,
+            avg_curvature,
+            avg_torsion,
+        ) = self.update()
+
+        stability_params = StabilityParams(
+            PS_mat=PS_mat,
+            time_per_pulse_s=self.T,
+            vector_length=self.Vector_Length,
+            maximum_amplitude_hz=self.maximumAmplitude,
+            scaling_range_percent=float(self.stability_amplitude_range_text.get()),
+            offset_range_khz=float(self.stability_offset_range_text.get()),
+            stability_calculation_method=int(self.selected_stability_option.get()),
+            initial_vector=self.initialVector,
+            calculation_language=self.calculation_language,
+        )
+
+        X, Y, Z, quality, axis, angle = calculate_stability_backend(stability_params)
+
         self.ax5.clear()
-        self.ax5.plot_surface(X, Y, Z, cmap='viridis', edgecolor='black', linewidth=0.1)
+        self.ax5.plot_surface(X, Y, Z, cmap="viridis", edgecolor="black", linewidth=0.1)
         self.canvas5.draw()
-        calc_curve_stability_str = (f"Pulse Sequence stability\n"
-	    f"Offset range: {float(self.stability_offset_range_text.get())} kHz\n"
-		f"Amplitude range: {float(self.stability_amplitude_range_text.get())} %\n"
-		f"rotation axis: {axis} \n"
-		f"rotation angle: {angle} °\n"
-        f"average quality: {quality} \n")
-        self.text_area_set(text_area = self.info_error_text, text_str = calc_curve_stability_str, reset_bool = 0)
-        #stats = pstats.Stats(profiler).sort_stats('cumulative')
-        #stats.print_stats()
-        #print("Calculate stability function not yet fully implemented!!")
+
+        calc_curve_stability_str = (
+            f"Pulse Sequence stability\n"
+            f"Offset range: {float(self.stability_offset_range_text.get())} kHz\n"
+            f"Amplitude range: {float(self.stability_amplitude_range_text.get())} %\n"
+            f"rotation axis: {axis} \n"
+            f"rotation angle: {angle} °\n"
+            f"average quality: {quality} \n"
+        )
+
+        self.text_area_set(
+            text_area=self.info_error_text,
+            text_str=calc_curve_stability_str,
+            reset_bool=0,
+        )
 		 
     def doc(self):
         doc_window = tk.Toplevel(self.master)
@@ -543,18 +521,31 @@ Tips
         if chosen_directory:
             self.qualityImages_output_dir_text.delete(0, tk.END)  # Clear any existing text
             self.qualityImages_output_dir_text.insert(tk.END, chosen_directory)
- 
+    
+    def report_quality_image_progress(self, message):
+        self.text_area_set(
+            text_area=self.info_error_text,
+            text_str=message,
+            reset_bool=0,
+        )
+        self.master.update_idletasks()                  
+
     def calc_qualityImages(self):
-        PSQM = calculate_pulse_sequence_quality_images(self,
-                                                       self.qualityImages_input_dir_text.get(), 
-                                                       float(self.qualityImages_Range_text.get())*1000, 
-                                                       float(self.qualityImages_TimeperPuls_text.get())*(10**(-6)), 
-													   float(self.qualityImages_Umax_text.get())*1000, 
-                                                       self.initialVector, 
-													   int(self.selected_qualityImages_calcType.get()), 
-                                                       int(self.selected_qualityImages_changingVariable.get()),
-													   float(self.qualityImages_Resolution_text.get()),
-                                                       language=self.calculation_language)
+        quality_image_params = QualityImageParams(
+            input_directory=self.qualityImages_input_dir_text.get(),
+            range_hz=float(self.qualityImages_Range_text.get()) * 1000,
+            time_per_pulse_s=float(self.qualityImages_TimeperPuls_text.get()) * 1e-6,
+            maximum_amplitude_hz=float(self.qualityImages_Umax_text.get()) * 1000,
+            initial_vector=self.initialVector,
+            calculation_type=int(self.selected_qualityImages_calcType.get()),
+            changing_variable=int(self.selected_qualityImages_changingVariable.get()),
+            resolution=float(self.qualityImages_Resolution_text.get()),
+            calculation_language=self.calculation_language,
+            progress_callback=self.report_quality_image_progress,
+        )
+
+        PSQM = calculate_quality_image_backend(quality_image_params)
+
         while os.path.exists(self.qualityImages_output_dir_text.get()+"/QualityImage"+str(self.export_count)):
             self.export_count += 1
         os.mkdir(self.qualityImages_output_dir_text.get()+"/QualityImage"+str(self.export_count))
@@ -610,49 +601,103 @@ Tips
         self.export_count = 0
         self.export_dir_count = 0
 
-    def export_data(self,type,exp_str="empty"):
-        CM, VM, PS_mat, totalRot, phi, numberOfPulses, Axy, Axz, Ayz, arc_length, curvature, torsion, integrated_curvature, integrated_torsion, integrated_absolut_torsion, avg_curvature, avg_torsion = self.update()
-        export_string = (f"Pulse Sequence {self.PS} ({round(1E3 * totalRot) / 1E3}°)\n"
-	    f"Time per Pulse: {self.T * 10**6} µs\n"
-		f"Vector Length: {self.Vector_Length}\n"
-		f"Maximum Amplitude: {self.maximumAmplitude / 1000} kHz\n"
-		f"Offset: {self.Offset / 1000} kHz\n"
-		f"InpoFact: {self.InpoFact}\n"
-		f"x Expand: {self.x_Expand}\n"
-		f"Calculation Method: {self.calculationMethod}\n"
-		f"Initial Vector: {self.initialVector}\n"
-		f"Angle to x-Axis= {phi}°;\n"
-		f"number of pulses = {numberOfPulses};\n"
-		f"Axy= {Axy};\n"
-		f"Axz= {Axz},\n"
-		f"Ayz= {Ayz};\n"
-		f"Integrated Curvature= {integrated_curvature};\n"
-		f"Integrated Torsion= {integrated_torsion};\n"
-		f"Integrated abs Torsion= {integrated_absolut_torsion};")
-        if(type == 0):
-            os.mkdir(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count))
-            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Error_Curve.csv", CM, delimiter=",")
-            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Trajectory_Curve.csv", VM, delimiter=",")
-            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Pulse_Sequence.csv", PS_mat, delimiter=",")
-            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/curvature-arc_length.csv", np.column_stack((arc_length, curvature)), delimiter=",")
-            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/torsion-arc_length.csv", np.column_stack((arc_length, torsion)), delimiter=",")
-            with open(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Curve_data.txt", 'w') as file:
-                file.write(export_string)
-            mpld3.save_html(self.fig1, self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count)+"/Error_Curve_plot.html")	#######TODO
-            export_data_interface_str = "data exported to: "+  self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_count)
-            self.text_area_set(text_area = self.info_error_text, text_str = export_data_interface_str, reset_bool = 0)
-        if(type == 1):
-            os.mkdir(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str)
-            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/Error_Curve.csv", CM, delimiter=",")
-            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/Trajectory_Curve.csv", VM, delimiter=",")
-            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/Pulse_Sequence.csv", PS_mat, delimiter=",")
-            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/curvature-arc_length.csv", np.column_stack((arc_length, curvature)), delimiter=",")
-            np.savetxt(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/torsion-arc_length.csv", np.column_stack((arc_length, torsion)), delimiter=",")
-            with open(self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/Curve_data.txt", 'w') as file:
-                file.write(export_string)
-            mpld3.save_html(self.fig1, self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str+"/Error_Curve_plot.html")	#######TODO
-            export_data_interface_str = "data exported to: "+  self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count)+"/"+exp_str
-            self.text_area_set(text_area = self.info_error_text, text_str = export_data_interface_str, reset_bool = 0)
+    def export_data(self, type, exp_str="empty"):
+        (
+            CM,
+            VM,
+            PS_mat,
+            totalRot,
+            phi,
+            numberOfPulses,
+            Axy,
+            Axz,
+            Ayz,
+            arc_length,
+            curvature,
+            torsion,
+            integrated_curvature,
+            integrated_torsion,
+            integrated_absolut_torsion,
+            avg_curvature,
+            avg_torsion,
+        ) = self.update()
+
+        export_string = build_curve_data_export_string(
+            pulse_sequence=self.PS,
+            totalRot=totalRot,
+            time_per_pulse_s=self.T,
+            vector_length=self.Vector_Length,
+            maximum_amplitude_hz=self.maximumAmplitude,
+            offset_hz=self.Offset,
+            inpo_fact=self.InpoFact,
+            x_expand=self.x_Expand,
+            calculation_method=self.calculationMethod,
+            initial_vector=self.initialVector,
+            phi=phi,
+            numberOfPulses=numberOfPulses,
+            Axy=Axy,
+            Axz=Axz,
+            Ayz=Ayz,
+            integrated_curvature=integrated_curvature,
+            integrated_torsion=integrated_torsion,
+            integrated_absolut_torsion=integrated_absolut_torsion,
+        )
+
+        if type == 0:
+            output_dir = (
+                self.export_data_path_text.get()
+                + "/PulseSequenceAnalyzer_Data"
+                + str(self.export_count)
+            )
+
+            write_analysis_export(
+                output_dir=output_dir,
+                CM=CM,
+                VM=VM,
+                PS_mat=PS_mat,
+                arc_length=arc_length,
+                curvature=curvature,
+                torsion=torsion,
+                curve_data_string=export_string,
+                error_curve_figure=self.fig1,
+            )
+
+            export_data_interface_str = "data exported to: " + output_dir
+
+            self.text_area_set(
+                text_area=self.info_error_text,
+                text_str=export_data_interface_str,
+                reset_bool=0,
+            )
+
+        if type == 1:
+            output_dir = (
+                self.export_data_path_text.get()
+                + "/PulseSequenceAnalyzer_Dir_Data"
+                + str(self.export_dir_count)
+                + "/"
+                + exp_str
+            )
+
+            write_analysis_export(
+                output_dir=output_dir,
+                CM=CM,
+                VM=VM,
+                PS_mat=PS_mat,
+                arc_length=arc_length,
+                curvature=curvature,
+                torsion=torsion,
+                curve_data_string=export_string,
+                error_curve_figure=self.fig1,
+            )
+
+            export_data_interface_str = "data exported to: " + output_dir
+
+            self.text_area_set(
+                text_area=self.info_error_text,
+                text_str=export_data_interface_str,
+                reset_bool=0,
+            )
         
     def cancel_export(self, window):
         window.destroy()
@@ -767,53 +812,59 @@ Tips
         text_area.insert(1.0, text_str) 
         text_area.configure(state ='disabled')
 
-		
+
     def updateValues(self):
-        PS_str = self.pulse_sequence_text.get()
-        Pulse_Amplitude_str= self.param_entries[0].get()
-        Vector_Length_str= self.param_entries[1].get()
-        T_str= self.param_entries[2].get()
-        InpoFact_str= self.param_entries[3].get()
-        x_Expand_str= self.param_entries[4].get()
-        Offset_str= self.param_entries[5].get()
-        Scaling_str= self.param_entries[6].get()
-       
-        Pulse_Amplitude_Numeric= float(Pulse_Amplitude_str)
-        Vector_Length_Numeric= float(Vector_Length_str)
-        T_Numeric= float(T_str)
-        InpoFact_Numeric= int(InpoFact_str)
-        x_Expand_Numeric= float(x_Expand_str)
-        Offset_Numeric= float(Offset_str)
-        Scaling_Numeric= float(Scaling_str)
-        
-        self.maximumAmplitude = Pulse_Amplitude_Numeric*Scaling_Numeric*(10**3)/100
-        self.Offset = Offset_Numeric*(10**3)
-        self.T = T_Numeric*(10**-6)
-        self.PS = PS_str
-        self.Vector_Length = Vector_Length_Numeric
-        self.InpoFact = InpoFact_Numeric
-        self.x_Expand = x_Expand_Numeric
-        self.Scaling = Scaling_Numeric
-        
+        params = self.get_analyzer_params_from_gui()
+
+        self.maximumAmplitude = (
+            params.pulse_amplitude_khz
+            * params.scaling_percent
+            * 1000
+            / 100
+        )
+        self.Offset = params.offset_khz * 1000
+        self.T = params.time_per_pulse_us * 1e-6
+        self.PS = params.pulse_sequence
+        self.Vector_Length = params.vector_length
+        self.InpoFact = params.inpo_fact
+        self.x_Expand = params.x_expand
+        self.Scaling = params.scaling_percent
+
         self.user_interaction = False
         self.amplitude_slider.set(self.Scaling)
-        self.offset_slider.set(self.Offset/1000)
+        self.offset_slider.set(self.Offset / 1000)
 
 		
     def update(self):
         #print(self.disp_values)
         self.update_count += 1
         self.updateValues()
-        CM, VM, PS_mat = createCurve(PulseSequence=self.PS,T=self.T,l=self.Vector_Length,maximumAmplitude = self.maximumAmplitude,offset = self.Offset, inpoFact = self.InpoFact, xExpand = self.x_Expand, calculationMethod=self.calculationMethod, initialVector=self.initialVector, language=self.calculation_language)
+        params = self.get_analyzer_params_from_gui()
+        result = analyze_pulse_sequence(params)
+
+        CM = result.CM
+        VM = result.VM
+        PS_mat = result.PS_mat
+
+        totalRot = result.totalRot
+        phi = result.phi
+        numberOfPulses = result.numberOfPulses
+
+        Axy = result.Axy
+        Axz = result.Axz
+        Ayz = result.Ayz
+
+        arc_length = result.arc_length
+        curvature = result.curvature
+        torsion = result.torsion
+
+        integrated_curvature = result.integrated_curvature
+        integrated_torsion = result.integrated_torsion
+        integrated_absolut_torsion = result.integrated_absolut_torsion
+        avg_curvature = result.avg_curvature
+        avg_torsion = result.avg_torsion
         self.plot3DCurve(CurveX = CM[:,0]+np.linspace(0,self.x_Expand,np.shape(CM)[0]).transpose(), CurveY = CM[:,1], CurveZ = CM[:,2], axes=self.ax1, canvas = self.canvas1, Title="Error-Kurve")
         self.plot3DCurve(CurveX = VM[:,0], CurveY = VM[:,1], CurveZ = VM[:,2], axes=self.ax2, canvas = self.canvas2, Title="Trajectory")
-        totalRot = angle_between_vectors(VM[0,:], VM[-1,:])
-        phi = angle_with_x_axis(VM[-1,:])
-        numberOfPulses = number_of_pulses(PS_mat, self.InpoFact)
-        Axy = calculate_closed_curve_area_app(CM[:,[0,1]], close_curve=False)
-        Axz = calculate_closed_curve_area_app(CM[:,[0,2]], close_curve=False)
-        Ayz = calculate_closed_curve_area_app(CM[:,[1,2]], close_curve=False)
-        arc_length, curvature, torsion, integrated_curvature, integrated_torsion, integrated_absolut_torsion, avg_curvature, avg_torsion = curvature_torsion_3d(CM)
         self.plot2DCurve(CurveX = arc_length, CurveY = curvature, axes = self.ax3, canvas = self.canvas3, xLabel = "arc_length", yLabel = "curvature", Title = "Curvature")
         self.plot2DCurve(CurveX = arc_length, CurveY = torsion, axes = self.ax4, canvas = self.canvas4, xLabel = "arc_length", yLabel = "torsion", Title = "Torsion")
         self.text_area_set(self.curve_data_text, self.get_curve_data_str(totalRot, phi, numberOfPulses, Axy, Axz, Ayz,CurvInt=integrated_curvature, TorsInt=integrated_torsion, TorsInt_abs=integrated_absolut_torsion), True)
@@ -932,7 +983,7 @@ class EditPSWindow:
         self.PS_analyzer = PS_analyzer
         self.PS_edit_window = tk.Toplevel(master)
         self.PS_edit_window.title("Edit Pulse Sequence")
-        self.PS_initial_String = "R(B1 amplitude [%], Phase [°], Duration (multiple of T sub pulse) [µs]);\nPR(B1 amplitude [%], starting Phase [°], ending Phase [°], Duration (multiple of T sub pulse) [µs]); eg:\nPR(100, 0, 360, 90);\nP(99.6, 180, 50.5);\nP(100, 0.1, 60);"
+        self.PS_initial_String = "R(B1 amplitude [%], Phase [°], Duration (multiple of T sub pulse) [µs]);\nPR(B1 amplitude [%], starting Phase [°], ending Phase [°], Duration (multiple of T sub pulse) [µs]); eg:\nPR(100, 0, 360, 90);\nR(99.6, 180, 50.5);\nR(100, 0.1, 60);"
         self.PS_example_String = """R(99.1993, 134.201134, 0.5);
 R(100.0,   20, 2.5);
 R(18.0,    -160.0, 10.0);
@@ -972,5 +1023,4 @@ def main():
     root = tk.Tk()
     app = PulseSequenceAnalyzerApp(root)
     root.mainloop()
-
 

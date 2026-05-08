@@ -8,7 +8,18 @@ import vectors
 import os
 import numpy as np
 
-def calculate_pulse_sequence_quality_images(GUI, dirname, Range, T, Umax, initialVector, calcType, changingVariable, Resolution, language = "Rust"):
+def calculate_pulse_sequence_quality_images(
+    dirname,
+    Range,
+    T,
+    Umax,
+    initialVector,
+    calcType,
+    changingVariable,
+    Resolution,
+    language="Rust",
+    progress_callback=None,
+):
     files = os.listdir(dirname)
     sorted_files = sorted(files)
     PSnames = [f for f in sorted_files if 'bruker' in f]
@@ -35,7 +46,8 @@ def calculate_pulse_sequence_quality_images(GUI, dirname, Range, T, Umax, initia
         PI = np.ones((offsetRes, PSnumber))
         for n1 in range(PSnumber):
             PS = np.array(getPulseSequence(os.path.join(dirname, PSnames[n1])))
-            GUI.text_area_set(text_area = GUI.info_error_text, text_str = f"{n1 + 1} von {PSnumber}", reset_bool = 0)
+            if progress_callback is not None:
+                progress_callback(f"{n1 + 1} von {PSnumber}")
             for n2 in range(offsetRes):
                 Q = calculate_pulse_sequence_quality(PS, T, 1, Umax + (-Range / 2 + (n2 - 1) * offset), 0, 1, np.array(initialVector), shallVec, calcType, language=language)
                 #print("Q: "+str(Q))
@@ -47,7 +59,8 @@ def calculate_pulse_sequence_quality_images(GUI, dirname, Range, T, Umax, initia
         PI = np.ones((offsetRes, PSnumber))
         for n1 in range(PSnumber):
             PS = np.array(getPulseSequence(os.path.join(dirname, PSnames[n1])))
-            GUI.text_area_set(text_area = GUI.info_error_text, text_str = f"{n1 + 1} von {PSnumber}", reset_bool = 0)
+            if progress_callback is not None:
+                progress_callback(f"{n1 + 1} von {PSnumber}")
             for n2 in range(offsetRes):
                 Q = calculate_pulse_sequence_quality(PS, T, 1, Umax, -Range / 2 + (n2 - 1) * offset, 1, np.array(initialVector), shallVec, calcType, target_Rotation = R_target.astype(np.float64), language=language)
                 if abs(1 - Q) < 10**(-15):
