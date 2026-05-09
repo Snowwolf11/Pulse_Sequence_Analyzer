@@ -1,25 +1,316 @@
-{\rtf1\ansi\ansicpg1252\cocoartf2759
-\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;\f1\fnil\fcharset0 Menlo-Regular;}
-{\colortbl;\red255\green255\blue255;\red0\green0\blue0;}
-{\*\expandedcolortbl;;\csgray\c0;}
-\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
-\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+# Pulse Sequence Analyzer (PSA)
 
-\f0\fs24 \cf0 To run put following command in terminal:\
-\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+A Python application for analyzing, visualizing, and exporting geometric properties of RF pulse sequences.
 
-\f1\fs22 \cf2 \CocoaLigature0 python /Users/leon/Desktop/Physik/Glaser/psa/main.py 
-\f0\fs24 \cf0 \CocoaLigature1 \
-\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
-\cf0 \
-\
-- Matrix/ Helix method work\
-\
-TODO:\
-\
-\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
-\cf0 - Initial vector should only rotate curve\
-\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
-\cf0 - Include settings for target rotation/ orientation\
-- Test fidelity plot/calculation\
-- test quality images}
+The Pulse Sequence Analyzer transforms pulse sequences into spatial trajectories and error curves, allowing investigation of:
+
+- Rotation behavior
+- Stability
+- Curvature and torsion
+- Offset/amplitude robustness
+- Quality maps
+- Geometric pulse properties
+
+The project includes multiple GUI frontends:
+
+- Tkinter GUI (legacy fallback)
+- PySide6 GUI (modern desktop GUI)
+- Dash GUI (browser-based interactive GUI)
+
+---
+
+# Features
+
+## Pulse Sequence Analysis
+
+Analyze pulse sequences and compute:
+
+- Error curves
+- Magnetization trajectories
+- Curvature
+- Torsion
+- Integrated geometric quantities
+- Rotation axis and angle
+- Pulse statistics
+
+---
+
+## Interactive Visualization
+
+Interactive plotting of:
+
+- 3D error curves
+- 3D trajectories
+- Curvature vs arc length
+- Torsion vs arc length
+- Stability surfaces
+- Quality images
+
+---
+
+## Stability Analysis
+
+Compute robustness against:
+
+- Amplitude scaling
+- Frequency offset
+- Rotation angle deviations
+
+Supports:
+
+- PP mode
+- UR mode
+- Angle mode
+
+---
+
+## Quality Image Generation
+
+Generate and export quality images for entire directories of pulse sequences.
+
+Supports:
+
+- Offset scans
+- Amplitude scans
+- SS calculations
+- UR calculations
+
+---
+
+## Multiple Calculation Backends
+
+Supports:
+
+- Python backend
+- Rust backend (faster)
+
+---
+
+# Project Structure
+
+text psa/ │ ├── psa/ │   ├── GUI.py                # Tkinter GUI │   ├── GUI_pyside6.py        # Modern PySide6 GUI │   ├── GUI_dash.py           # Dash browser GUI │   ├── app_backend.py │   ├── createCurve.py │   ├── ... │ ├── main.py ├── environment.yml ├── requirements.txt ├── pyproject.toml └── README.md 
+
+---
+
+# Installation
+
+## 1. Clone Repository
+
+bash git clone <repository-url> cd psa 
+
+---
+
+## 2. Create Conda Environment
+
+bash conda env create -f environment.yml 
+
+---
+
+## 3. Activate Environment
+
+bash conda activate psa 
+
+---
+
+## 4. Install PSA Package
+
+bash python -m pip install -e . 
+
+---
+
+# Starting the Application
+
+## Tkinter GUI (legacy)
+
+bash python main.py 
+
+or:
+
+bash python -m psa.GUI 
+
+---
+
+## PySide6 GUI (recommended)
+
+bash python -m psa.GUI_pyside6 
+
+---
+
+## Dash GUI (browser GUI - not recommended)
+
+bash python -m psa.GUI_dash 
+
+Then open the shown localhost address in your browser.
+
+Usually:
+
+text http://127.0.0.1:8050 
+
+---
+
+# Using the Application
+
+## 1. Load a Pulse Sequence
+
+You can:
+
+- Enter a pulse sequence file
+- Browse for a file
+- Create/edit sequences using the editor
+
+Supported formats:
+
+- .csv
+- .bruker
+- generated pulse sequences
+
+---
+
+## 2. Adjust Parameters
+
+Main parameters:
+
+| Parameter | Description |
+|---|---|
+| Pulse Amplitude | Maximum RF amplitude |
+| Vector Length | Magnetization vector length |
+| Time/Pulse | Pulse duration |
+| Offset | Frequency offset |
+| Scaling | RF scaling |
+| InpoFact | Interpolation factor |
+| x_Expand | Visual x-axis expansion |
+
+---
+
+## 3. Refresh / Recalculate
+
+Press:
+
+- Refresh button
+- ENTER key
+
+to recompute all plots and analysis.
+
+---
+
+## 4. Interactive Sliders
+
+Use sliders for:
+
+- Amplitude scaling
+- Offset variation
+
+Playback buttons automatically sweep parameters to visualize curve evolution dynamically.
+
+---
+
+## 5. Stability Calculations
+
+Open the Stability tab and configure:
+
+- Amplitude range
+- Offset range
+- Stability mode
+
+Then click:
+
+text Calculate Stability 
+
+---
+
+## 6. Quality Images
+
+Configure:
+
+- Input directory
+- Output directory
+- Resolution
+- Scan range
+- Calculation type
+
+Then calculate and export quality images.
+
+---
+
+# Pulse Sequence Syntax
+
+Example:
+
+text R(100, 0, 50); R(100, 90, 50);  PR(100, 0, 360, 90); 
+
+## Commands
+
+### Rectangular Pulse
+
+text R(amplitude [%], phase [°], duration [µs]); 
+
+### Phase Ramp Pulse
+
+text PR(amplitude [%], start phase [°], end phase [°], duration [µs]); 
+
+---
+
+# Recommended GUI
+
+## Recommended: PySide6 GUI
+
+Advantages:
+
+- Modern dark theme
+- Better responsiveness
+- Better scalability
+- Better interactivity
+- Easier future extension
+
+---
+
+# Dependencies
+
+Main dependencies:
+
+- numpy
+- scipy
+- matplotlib
+- plotly
+- dash
+- PySide6
+- mplcursors
+- mpld3
+
+---
+
+# Rust Backend
+
+The project supports optional Rust acceleration for faster calculations.
+
+If enabled, the Rust backend is automatically used when selected in the GUI.
+
+---
+
+# Development
+
+Install editable package:
+
+bash python -m pip install -e . 
+
+---
+
+# Git Workflow
+
+Commit changes:
+
+bash git add . git commit -m "Description" git push 
+
+---
+
+# Notes
+
+- Tkinter GUI remains available as fallback.
+- PySide6 is the primary desktop GUI moving forward.
+- Dash GUI enables browser-based visualization and remote usage.
+
+---
+
+# Author
+
+Leon Eppinger
