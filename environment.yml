@@ -1,0 +1,14 @@
+name: psa
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.12
+  - pip
+  - numpy<2
+  - matplotlib
+  - scipy
+  - pandas
+  - pip:
+      - -r requirements.txt

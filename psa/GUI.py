@@ -54,12 +54,72 @@ import mplcursors
 import os
 import mpld3
 
+DARK_BG = "#0f172a"
+PANEL_BG = "#111827"
+TEXT_FG = "#e5e7eb"
+MUTED_FG = "#94a3b8"
+ACCENT = "#2563eb"
+ENTRY_BG = "#020617"
+
+
+def apply_dark_theme(root):
+    style = ttk.Style(root)
+
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+
+    root.configure(bg=DARK_BG)
+
+    style.configure(".", background=DARK_BG, foreground=TEXT_FG, fieldbackground=ENTRY_BG)
+    style.configure("TFrame", background=DARK_BG)
+    style.configure("TLabel", background=DARK_BG, foreground=TEXT_FG)
+    style.configure("TButton", background=ACCENT, foreground="white", padding=6)
+    style.map("TButton", background=[("active", "#1d4ed8")])
+
+    style.configure("TNotebook", background=DARK_BG, borderwidth=0)
+    style.configure("TNotebook.Tab", background=PANEL_BG, foreground=TEXT_FG, padding=(12, 6))
+    style.map(
+        "TNotebook.Tab",
+        background=[("selected", ACCENT)],
+        foreground=[("selected", "white")],
+    )
+
+    style.configure("TEntry", fieldbackground=ENTRY_BG, foreground=TEXT_FG)
+    style.configure("TRadiobutton", background=DARK_BG, foreground=TEXT_FG)
+    style.configure("TCheckbutton", background=DARK_BG, foreground=TEXT_FG)
+
+def darken_widget_tree(widget):
+    for child in widget.winfo_children():
+        cls = child.winfo_class()
+
+        try:
+            if cls in ("Frame", "TFrame"):
+                child.configure(bg=DARK_BG)
+            elif cls in ("Label",):
+                child.configure(bg=DARK_BG, fg=TEXT_FG)
+            elif cls in ("Button",):
+                child.configure(bg=ACCENT, fg="#f8fafc", activebackground="#334155", activeforeground="#ffffff")
+            elif cls in ("Entry",):
+                child.configure(bg=ENTRY_BG, fg=TEXT_FG, insertbackground=TEXT_FG)
+            elif cls in ("Text",):
+                child.configure(bg=ENTRY_BG, fg=TEXT_FG, insertbackground=TEXT_FG)
+            elif cls in ("Radiobutton", "Checkbutton"):
+                child.configure(bg=DARK_BG, fg=TEXT_FG, activebackground=DARK_BG, activeforeground=TEXT_FG, selectcolor=ENTRY_BG)
+            elif cls in ("Scale",):
+                child.configure(bg=DARK_BG, fg=TEXT_FG, troughcolor=PANEL_BG, activebackground=ACCENT)
+        except tk.TclError:
+            pass
+
+        darken_widget_tree(child)
 
 ########################################################################
 class PulseSequenceAnalyzerApp:
     def __init__(self, master):
         self.master = master
-        master.title("Pulse Sequence Analyses")
+        master.title("Pulse Sequence Analyzer")
+        #apply_dark_theme(master)
         master.bind('<Return>', self.handle_enter)
         self.master.pack_propagate(0)  # Prevent resizing based on content
         self.master.grid_rowconfigure(0, weight=2)  # Allow row 0 to expand when window is resized
@@ -186,7 +246,7 @@ class PulseSequenceAnalyzerApp:
         self.stability_offset_range_text.grid(row = 0, column = 3, sticky = "E")
         self.stability_offset_range_text.insert(0, "20")
 			#calculate Button
-        self.calculate_stability_button = tk.Button(self.stability_frame, text="Calculate", command=self.calculate_stability)
+        self.calculate_stability_button = ttk.Button(self.stability_frame, text="Calculate", command=self.calculate_stability)
         self.calculate_stability_button.grid(row = 0, column = 4, sticky = "E")
 			#Axes for surface plot
         self.fig5 = plt.figure(figsize=(5, 3))
@@ -233,11 +293,11 @@ class PulseSequenceAnalyzerApp:
         self.export_data_path_text =  tk.Entry(self.options_frame, width = 40)
         self.export_data_path_text.grid(row = 1, column= 1, padx = 10, pady = 10)
         self.export_data_path_text.insert(0, DEFAULTS.export_directory)
-        self.export_browse_directory_button =  tk.Button(self.options_frame,  text="Browse", command=self.export_browse_directory)
+        self.export_browse_directory_button =  ttk.Button(self.options_frame,  text="Browse", command=self.export_browse_directory)
         self.export_browse_directory_button.grid(row = 1, column = 2, padx = 10, pady = 10)
-        self.export_data_path_button =  tk.Button(self.options_frame,  text="Export Data", command=self.export_data_interface)
+        self.export_data_path_button =  ttk.Button(self.options_frame,  text="Export Data", command=self.export_data_interface)
         self.export_data_path_button.grid(row = 1, column = 3, padx = 10, pady = 10)    
-        self.export_data_path_button =  tk.Button(self.options_frame,  text="Export Dir Data", command=self.export_dir_data_interface)  #export data of all the pulses nin the same directory as the active pulse
+        self.export_data_path_button =  ttk.Button(self.options_frame,  text="Export Dir Data", command=self.export_dir_data_interface)  #export data of all the pulses nin the same directory as the active pulse
         self.export_data_path_button.grid(row = 1, column = 4, padx = 10, pady = 10)    
 			######## Quality Images stuff
         self.createQualityImages_label = tk.Label(self.options_frame, text = "create Quality Images")
@@ -291,25 +351,25 @@ class PulseSequenceAnalyzerApp:
         self.qualityImages_input_dir_text =  tk.Entry(self.options_frame, width = 40)
         self.qualityImages_input_dir_text.grid(row = 6, column= 1, columnspan = 2, sticky ="W")
         self.qualityImages_input_dir_text.insert(0, DEFAULTS.quality_input_directory)
-        self.qualityImages_input_dir_button =  tk.Button(self.options_frame,  text="Browse", command=self.qualityImages_input_browse_directory)
+        self.qualityImages_input_dir_button =  ttk.Button(self.options_frame,  text="Browse", command=self.qualityImages_input_browse_directory)
         self.qualityImages_input_dir_button.grid(row = 6, column = 2)        
         self.qualityImages_output_dir_label = tk.Label(self.options_frame, text="Output Directory:")
         self.qualityImages_output_dir_label.grid(row = 7, column = 0, sticky = "E")
         self.qualityImages_output_dir_text =  tk.Entry(self.options_frame, width = 40)
         self.qualityImages_output_dir_text.grid(row = 7, column= 1, columnspan = 2, sticky ="W")
         self.qualityImages_output_dir_text.insert(0, DEFAULTS.quality_output_directory)
-        self.qualityImages_output_dir_button =  tk.Button(self.options_frame,  text="Browse", command=self.qualityImages_output_browse_directory)
+        self.qualityImages_output_dir_button =  ttk.Button(self.options_frame,  text="Browse", command=self.qualityImages_output_browse_directory)
         self.qualityImages_output_dir_button.grid(row = 7, column = 2)   
 			# calculate Button
-        self.qualityImages_calculate_button =  tk.Button(self.options_frame,  text="Calculate", command=self.calc_qualityImages)
+        self.qualityImages_calculate_button =  ttk.Button(self.options_frame,  text="Calculate", command=self.calc_qualityImages)
         self.qualityImages_calculate_button.grid(row = 8, column = 3, stick = "E")    	
         
         # Menu Button
-        self.menu_button = tk.Button(self.master, text="Menu", command=self.open_menu)
+        self.menu_button = ttk.Button(self.master, text="Menu", command=self.open_menu)
         self.menu_button.grid(row = 0, column = 0, padx=20, pady=10,sticky="NW")
         
         # Documentation Button
-        self.doc_button = tk.Button(self.master, text="Doc", command=self.doc)
+        self.doc_button = ttk.Button(self.master, text="Doc", command=self.doc)
         self.doc_button.grid(row=0, column = 1, padx=2, pady=10, sticky="NW")
 
         # Text Edit Field for Pulse Sequence
@@ -322,9 +382,9 @@ class PulseSequenceAnalyzerApp:
         self.pulse_sequence_text = tk.Entry(self.pulse_sequence_input_frame, width=45)
         self.pulse_sequence_text.insert(0, self.PS) 
         self.pulse_sequence_text.grid(row = 1, column = 0, columnspan =2, padx=3, pady=5)
-        self.PS_browse_directory_button =  tk.Button(self.pulse_sequence_input_frame,  text="Browse", command=self.PS_browse_file)
+        self.PS_browse_directory_button =  ttk.Button(self.pulse_sequence_input_frame,  text="Browse", command=self.PS_browse_file)
         self.PS_browse_directory_button.grid(row = 0, column = 1, padx = 3, pady = 10, sticky = "W")      
-        self.PS_edit_button =  tk.Button(self.pulse_sequence_input_frame,  text="Edit", command=self.edit_PS)
+        self.PS_edit_button =  ttk.Button(self.pulse_sequence_input_frame,  text="Edit", command=self.edit_PS)
         self.PS_edit_button.grid(row = 0, column = 1, padx = 3, pady = 10, sticky = "E")   
 
         # Parameter Adjustments
@@ -364,7 +424,7 @@ class PulseSequenceAnalyzerApp:
         self.info_error_text.grid(row=6, column = 0, columnspan = 2, padx=10, pady=4, sticky="NSEW")
 
         # Refresh Button
-        self.refresh_button = tk.Button(self.master, text="Refresh", command=self.refresh)
+        self.refresh_button = ttk.Button(self.master, text="Refresh", command=self.refresh)
         self.refresh_button.grid(row=0, column = 1, padx=2, pady=10, sticky="NE")
 
         # Sliders for Amplitude and Offset
@@ -376,7 +436,7 @@ class PulseSequenceAnalyzerApp:
         #self.amplitude_slider = tk.Scale(self.slider_frame, length = 600, width = 20, from_=0, to=200, orient=tk.HORIZONTAL)
         self.amplitude_slider.set(self.Scaling)
         self.amplitude_slider.grid(row=0, column = 1, padx=5, pady=5)
-        self.amplitude_slider_play_button = tk.Button(self.slider_frame, text = "play", command=self.play_amplitude)
+        self.amplitude_slider_play_button = ttk.Button(self.slider_frame, text = "play", command=self.play_amplitude)
         self.amplitude_slider_play_button.grid(row = 0, column = 2, padx=10, pady=5)
         self.offset_label = tk.Label(self.slider_frame, text="Offset kHz:")
         self.offset_label.grid(row=1, column = 0, padx=5, pady=5)
@@ -384,8 +444,10 @@ class PulseSequenceAnalyzerApp:
         #self.offset_slider = tk.Scale(self.slider_frame, length = 600, width = 20, from_=-20, to=20, orient=tk.HORIZONTAL)
         self.offset_slider.set(self.Offset/1000)
         self.offset_slider.grid(row=1, column = 1, padx=5, pady=5)
-        self.offset_slider_play_button = tk.Button(self.slider_frame, text = "play", command=self.play_offset)
+        self.offset_slider_play_button = ttk.Button(self.slider_frame, text = "play", command=self.play_offset)
         self.offset_slider_play_button.grid(row = 1, column = 2, padx=10, pady=5)
+
+        #darken_widget_tree(self.master)
 
         
 	#########################
@@ -565,9 +627,9 @@ class PulseSequenceAnalyzerApp:
         info_window.title("Info Window")
         info_window_label = tk.Label(info_window, text= "Data will be exported to directory: " + self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Data"+str(self.export_count))
         info_window_label.grid(row = 0, column = 0, columnspan = 2)
-        info_window_ok_button = tk.Button(info_window, text="OK", command=lambda: self.info_window_ok_button_pressed(info_window, 0))
+        info_window_ok_button = ttk.Button(info_window, text="OK", command=lambda: self.info_window_ok_button_pressed(info_window, 0))
         info_window_ok_button.grid(row = 1, column = 0)
-        info_window_cancel_button = tk.Button(info_window, text="cancel", command=lambda: self.cancel_export(info_window))
+        info_window_cancel_button = ttk.Button(info_window, text="cancel", command=lambda: self.cancel_export(info_window))
         info_window_cancel_button.grid(row = 1, column = 1)
 
     def export_dir_data_interface(self):
@@ -577,9 +639,9 @@ class PulseSequenceAnalyzerApp:
         info_window.title("Info Window")
         info_window_label = tk.Label(info_window, text= "Directory Data will be exported to directory: " + self.export_data_path_text.get()+"/PulseSequenceAnalyzer_Dir_Data"+str(self.export_dir_count))
         info_window_label.grid(row = 0, column = 0, columnspan = 2)
-        info_window_ok_button = tk.Button(info_window, text="OK", command=lambda: self.info_window_ok_button_pressed(info_window, 1))
+        info_window_ok_button = ttk.Button(info_window, text="OK", command=lambda: self.info_window_ok_button_pressed(info_window, 1))
         info_window_ok_button.grid(row = 1, column = 0)
-        info_window_cancel_button = tk.Button(info_window, text="cancel", command=lambda: self.cancel_export(info_window))
+        info_window_cancel_button = ttk.Button(info_window, text="cancel", command=lambda: self.cancel_export(info_window))
         info_window_cancel_button.grid(row = 1, column = 1)
 
     def info_window_ok_button_pressed(self, window, type):
@@ -948,15 +1010,15 @@ class MenuWindow:
         self.display_values_checkbox.grid(row=9, column=0, columnspan=2)
 
 		# Werte sichern	
-        self.save_button = tk.Button(self.menu_window, text="save", command=self.save_menu)
+        self.save_button = ttk.Button(self.menu_window, text="save", command=self.save_menu)
         self.save_button.grid(row=10, column=0, columnspan=2, pady=10)
         
         # Schließen des Menüfensters
-        self.close_button = tk.Button(self.menu_window, text="Close", command=self.close_menu)
+        self.close_button = ttk.Button(self.menu_window, text="Close", command=self.close_menu)
         self.close_button.grid(row=10, column=2, columnspan=2, pady=10)
 		
 		#reset the app to initial values
-        self.reset_button = tk.Button(self.menu_window, text="Reset Analyzer", command=self.reset_analyzer)
+        self.reset_button = ttk.Button(self.menu_window, text="Reset Analyzer", command=self.reset_analyzer)
         self.reset_button.grid(row=9, column=2, columnspan=1, pady=5)
 
     def reset_analyzer(self):
@@ -1007,7 +1069,7 @@ R(14.0, 0.0);"""
         self.PS_edit_text.insert(1.0, self.PS_initial_String)
 
 		# Werte sichern	
-        self.plot_button = tk.Button(self.PS_edit_window, text="Plot", command=self.plot_PS)
+        self.plot_button = ttk.Button(self.PS_edit_window, text="Plot", command=self.plot_PS)
         self.plot_button.grid(row=3, column=1, columnspan=1, pady=10)
         
     def plot_PS(self):

@@ -2,3 +2,4 @@
 */target
 vectors/tests
 .DS_Store
+.env/

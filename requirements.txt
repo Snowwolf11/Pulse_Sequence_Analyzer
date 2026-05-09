@@ -1,0 +1,8 @@
+dash
+plotly
+mplcursors
+mpld3
+setuptools
+wheel
+build
+setuptools-rust
