@@ -4,6 +4,7 @@
 @author: leon
 """
 from psa.createCoordinates_Matrix import *
+from psa.rotations import tangent_vectors
 from psa.old.createCoordinates_Helix import *
 from psa.getPulseSequence import *
 from psa.old.createCoordinates_HelixVanDamme import *
@@ -51,8 +52,11 @@ def  createCurve(PulseSequence,T=0.0000005,l=1,maximumAmplitude=10000,offset=890
             PS[:,0]=PS[:,0]/inpoFact;       #The Intensities of the PS get reduced by the factor inpoFact, to ensure the Curve stays the same (exept better resolution) for inpoFact≠0
             initialVector = initialVector/np.linalg.norm(initialVector)
             #VM=createVectorMatrix_app(app,PS,T,l,maximumAmplitude, offset, inpoFact); #A Matrix which contains all the vectors gets created
+            # True error-curve tangents t_0 (= initialVector, before the pulse) ... t_M (after the pulse),
+            # scaled to the step length l. Used for the trajectory and all orientation quantities.
+            VM = tangent_vectors(PS, T, l, maximumAmplitude, offset, inpoFact, initialVector)
             if calculationMethod == 1:
-              CM=createCoordinates_Matrix(PS,T,l,maximumAmplitude, offset, inpoFact, initialVector) #A Matrix which contains the Coordinate of Points of the Curve is created
+              CM = trapezoid_curve(VM) #A Matrix which contains the Coordinate of Points of the Curve is created
             elif(calculationMethod == 2):
               CM = createCoordinates_HelixV2(PS_ori,T,l*inpoFact/T,maximumAmplitude, offset, inpoFact, initialVector)
             else:
@@ -63,20 +67,12 @@ def  createCurve(PulseSequence,T=0.0000005,l=1,maximumAmplitude=10000,offset=890
             if np.isnan(np.sum(CM)):
                raise ValueError("CM contains nan!")
             
-            VM = calculate_VM(CM)
-            
             #[l_Curv, l_Tors, CurvMat, TorsVec, CurvInt, TorsInt, TorsInt_abs] = calculateCurvatureAndTorsion(CM); #calculates the Curvature and The Torsion of the Curve
             
             #plot3DCurve(CM[:,0]+np.linspace(0,xExpand,np.shape(CM)[0]).transpose(), CM[:,1], CM[:,2], Title='AHT-Kurve')
             
             return CM, VM, PS
 
-def calculate_VM(CM):
-    size_CM = CM.shape[0]
-    VM = np.ones((size_CM - 1, 3))
-    for n in range(size_CM - 1):
-        VM[n] = CM[n + 1] - CM[n]
-    return VM
     
 """
 def plot3DCurve(CurveX, CurveY, CurveZ, Title="", type="new"):

@@ -23,7 +23,8 @@ Define a pulse sequence as a list of rectangular pulses and phase ramps, using t
 
 Menu / Settings
 - Calculation method: **Rotation Matrix** or **Helix**.
-- Initial condition: select the **error direction**.
+- Initial vector: the **error direction** (noise axis) used to build the error curve.
+- Initial magnetization: the Bloch vector before the pulse, used for the **PP/SS fidelity** (final magnetization compared with its on-resonance value) and for the **Angle** stability mode (flip angle of the final magnetization from +z). Default: z.
 
 Error-Curve Window
 Plots the Error curve. Updates when you press **Refresh**, hit **Enter**, or change Offset/Amplitude.

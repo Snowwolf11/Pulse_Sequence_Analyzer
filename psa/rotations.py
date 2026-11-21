@@ -61,14 +61,27 @@ def quaternion_to_matrix(q):
     ], axis=-2)
 
 
-def inverse_rotate(q, v):
-    """R(q)^T v for quaternions (..., 4) and a vector v (3,) or vectors (..., 3)."""
+def rotate(q, v):
+    """R(q) v for quaternions (..., 4) and a vector v (3,) or vectors (..., 3).
+
+    With q the final quaternion of a pulse, this is the Bloch vector after the pulse
+    for initial Bloch vector v (forward, time-ordered evolution).
+    """
     q = np.asarray(q, dtype=np.float64)
     w = q[..., 0:1]
-    u = -q[..., 1:4]
+    u = q[..., 1:4]
     v = np.broadcast_to(np.asarray(v, dtype=np.float64), u.shape)
     t = 2.0 * np.cross(u, v)
     return v + w * t + np.cross(u, t)
+
+
+def inverse_rotate(q, v):
+    """R(q)^T v for quaternions (..., 4) and a vector v (3,) or vectors (..., 3).
+
+    With q_(k) this gives the error-curve tangent (toggling-frame image of v).
+    """
+    q = np.asarray(q, dtype=np.float64)
+    return rotate(np.concatenate([q[..., 0:1], -q[..., 1:4]], axis=-1), v)
 
 
 def tangent_vectors(PS, T, l, Umax, offset, inpoFact, initialVector):
@@ -88,8 +101,9 @@ def propagate_batch(PS, T, Umax, offset, inpoFact=1, initialVector=None, l=1.0):
 
     Umax, offset: scalars or arrays broadcastable to a common shape S.
     Returns the final quaternions (S + (4,)). If ``initialVector`` is given, additionally
-    returns the sum of all N + 1 tangents ``sum_k R_(k)^T (l * initialVector)`` (S + (3,)),
-    i.e. the end point of the error curve with unit step length.
+    returns the end point of the error curve with unit step length (S + (3,)), integrated with the
+    trapezoid rule over the N + 1 tangents t_k = R_(k)^T (l * initialVector):
+    sum_k t_k - (t_0 + t_N) / 2.
     """
     PS = np.asarray(PS, dtype=np.float64)
     Umax, offset = np.broadcast_arrays(np.asarray(Umax, dtype=np.float64), np.asarray(offset, dtype=np.float64))
@@ -127,5 +141,6 @@ def propagate_batch(PS, T, Umax, offset, inpoFact=1, initialVector=None, l=1.0):
 
     q = np.stack([w, x, y, z], axis=-1).reshape(shape + (4,))
     if track:
+        tangent_sum -= 0.5 * (v + inverse_rotate(q.reshape(-1, 4), v))
         return q, tangent_sum.reshape(shape + (3,))
     return q

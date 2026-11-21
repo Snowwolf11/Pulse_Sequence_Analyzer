@@ -26,4 +26,8 @@ def get_default_initial_vector():
     return np.array([0, 0, 1])
 
 
+def get_default_initial_magnetization():
+    return np.array([0, 0, 1])
+
+
 DEFAULTS = AppDefaults()

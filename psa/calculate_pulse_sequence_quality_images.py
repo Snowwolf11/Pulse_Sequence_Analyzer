@@ -5,7 +5,7 @@ import numpy as np
 from psa.calculate_pulse_sequence_quality import calculate_pulse_sequence_quality_batch
 from psa.calculate_curve_stability import closest_canonical_rotation
 from psa.getPulseSequence import getPulseSequence
-from psa.rotations import tangent_vectors, inverse_total_rotation
+from psa.rotations import propagate_batch, rotate, inverse_total_rotation
 
 
 def calculate_pulse_sequence_quality_images(
@@ -18,9 +18,14 @@ def calculate_pulse_sequence_quality_images(
     changingVariable,
     Resolution,
     progress_callback=None,
+    initialMagnetization=np.array([0, 0, 1]),
 ):
     """log10(|1 - quality|) for every .bruker file in ``dirname`` (columns) over an amplitude
-    (changingVariable 1) or offset (changingVariable 2) scan of width ``Range`` Hz (rows)."""
+    (changingVariable 1) or offset (changingVariable 2) scan of width ``Range`` Hz (rows).
+
+    calcType 1 (SS/PP): target = on-resonance final magnetization R m0 of the LAST file, rounded to
+    45 degree steps; m0 = ``initialMagnetization``. calcType 2 (UR), 3 (closedness, noise axis
+    ``initialVector``)."""
     files = os.listdir(dirname)
     sorted_files = sorted(files)
     PSnames = [f for f in sorted_files if 'bruker' in f]
@@ -28,12 +33,14 @@ def calculate_pulse_sequence_quality_images(
     offsetRes = round(Range * Resolution/1000)
     variation = np.linspace(-Range / 2, Range / 2, offsetRes)
     initialVector = np.asarray(initialVector, dtype=np.float64)
+    m0 = np.asarray(initialMagnetization, dtype=np.float64)
+    m0 = m0 / np.linalg.norm(m0)
 
     PS_1 = np.array(getPulseSequence(os.path.join(dirname, PSnames[-1])))
-    VM_1 = tangent_vectors(PS_1, T, 1.0, Umax, 0.0, 1, initialVector)
+    M_1 = rotate(propagate_batch(PS_1, T, Umax, 0.0), m0)
     Rtot_on_res = inverse_total_rotation(PS_1, T, Umax, 0.0, 1)
-    shallVec = round_vector(VM_1[-1], 45)
-    print("Original Vector:", VM_1[-1])
+    shallVec = round_vector(M_1, 45)
+    print("Original Vector:", M_1)
 
     axis, angle, err_deg, R_target = closest_canonical_rotation(Rtot_on_res, return_matrix=True)
 
@@ -46,9 +53,9 @@ def calculate_pulse_sequence_quality_images(
             if progress_callback is not None:
                 progress_callback(f"{n1 + 1} von {PSnumber}")
             if changingVariable == 1:
-                Q = calculate_pulse_sequence_quality_batch(PS, T, 1, Umax + variation, 0.0, initialVector, shallVec, calcType)
+                Q = calculate_pulse_sequence_quality_batch(PS, T, 1, Umax + variation, 0.0, initialVector, shallVec, calcType, initialMagnetization=m0)
             else:
-                Q = calculate_pulse_sequence_quality_batch(PS, T, 1, Umax, variation, initialVector, shallVec, calcType, target_Rotation=R_target)
+                Q = calculate_pulse_sequence_quality_batch(PS, T, 1, Umax, variation, initialVector, shallVec, calcType, target_Rotation=R_target, initialMagnetization=m0)
             Q = np.where(np.abs(1 - Q) < 10**(-15), 1 - 10**(-15), Q)
             PI[:, n1] = np.log10(np.abs(1 - Q))
     return PI

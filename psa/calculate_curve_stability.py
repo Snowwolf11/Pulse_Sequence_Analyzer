@@ -2,20 +2,24 @@ import time
 
 import numpy as np
 
-from psa.rotations import tangent_vectors, inverse_total_rotation, propagate_batch, inverse_rotate
+from psa.rotations import inverse_total_rotation, propagate_batch, rotate
 from psa.calculate_pulse_sequence_quality import calculate_pulse_sequence_quality_batch
 
 
-def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRange_kHz=20, stabilityCalculationMethod=1, initialVector=np.array([0,0,1])):
+def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRange_kHz=20, stabilityCalculationMethod=1, initialVector=np.array([0,0,1]), initialMagnetization=np.array([0,0,1])):
     """Quality over a 200 x 200 grid of amplitude scaling x offset.
 
     Z[j, i] belongs to offset j and amplitude scaling i (as X, Y from np.meshgrid).
-    Methods: 1 = PP/SS (final tangent vs. target vector), 2 = UR (total rotation vs. closest
-    canonical rotation), 3 = polar angle of the final tangent in degrees.
+    Methods: 1 = PP/SS (final magnetization R m0 vs. target = on-resonance R m0, snapped to +-z
+    if nearly along z), 2 = UR (total rotation vs. closest canonical rotation), 3 = polar angle
+    (flip angle from +z) of the final magnetization R m0 in degrees.
+    m0 = ``initialMagnetization`` (normalized); ``initialVector`` (noise axis) is not used here.
     """
     a = time.time()
     PS = np.asarray(PS, dtype=np.float64)
     initialVector = np.asarray(initialVector, dtype=np.float64)
+    m0 = np.asarray(initialMagnetization, dtype=np.float64)
+    m0 = m0 / np.linalg.norm(m0)
 
     offsetRange = 1e3 * np.linspace(-offsetRange_kHz/2, offsetRange_kHz/2, 200)
 
@@ -24,7 +28,7 @@ def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRan
 
     X, Y = np.meshgrid(scalingRange, offsetRange)
 
-    medianVec = tangent_vectors(PS, T, l, Umax, 0.0, 1, initialVector)[-1]
+    medianVec = rotate(propagate_batch(PS, T, Umax, 0.0), m0)
     Rtot_on_res = inverse_total_rotation(PS, T, Umax, 0.0, 1)
 
     if np.linalg.norm(medianVec[2]) > 5 * (np.linalg.norm(medianVec[1]) + np.linalg.norm(medianVec[0])):
@@ -39,12 +43,12 @@ def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRan
 
     Z = np.ones_like(X)
     if stabilityCalculationMethod == 1:
-        Z = calculate_pulse_sequence_quality_batch(PS, T, l, X, Y, initialVector, shallVec, 1)
+        Z = calculate_pulse_sequence_quality_batch(PS, T, l, X, Y, initialVector, shallVec, 1, initialMagnetization=m0)
     elif stabilityCalculationMethod == 2:
         Z = calculate_pulse_sequence_quality_batch(PS, T, l, X, Y, initialVector, shallVec, 2, target_Rotation=R_target)
     elif stabilityCalculationMethod == 3:
-        VM_end = inverse_rotate(propagate_batch(PS, T, X, Y), l * initialVector)
-        Z = np.arctan2(np.sqrt(VM_end[..., 0]**2 + VM_end[..., 1]**2), VM_end[..., 2]) * 180 / np.pi
+        M_end = rotate(propagate_batch(PS, T, X, Y), m0)
+        Z = np.arctan2(np.sqrt(M_end[..., 0]**2 + M_end[..., 1]**2), M_end[..., 2]) * 180 / np.pi
 
     quality = float(np.mean(Z))
 

@@ -1,6 +1,6 @@
 # psa/app_backend.py
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import numpy as np
 import os
 import mpld3
@@ -142,6 +142,7 @@ class StabilityParams:
     offset_range_khz: float
     stability_calculation_method: int
     initial_vector: np.ndarray
+    initial_magnetization: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 1.0]))
 
 
 def calculate_stability_backend(params: StabilityParams):
@@ -154,6 +155,7 @@ def calculate_stability_backend(params: StabilityParams):
         offsetRange_kHz=params.offset_range_khz,
         stabilityCalculationMethod=params.stability_calculation_method,
         initialVector=params.initial_vector,
+        initialMagnetization=params.initial_magnetization,
     )
 
 
@@ -168,6 +170,7 @@ class QualityImageParams:
     changing_variable: int
     resolution: float
     progress_callback: object = None
+    initial_magnetization: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 1.0]))
 
 def calculate_quality_image_backend(params: QualityImageParams):
     return calculate_pulse_sequence_quality_images(
@@ -180,6 +183,7 @@ def calculate_quality_image_backend(params: QualityImageParams):
         changingVariable=params.changing_variable,
         Resolution=params.resolution,
         progress_callback=params.progress_callback,
+        initialMagnetization=params.initial_magnetization,
     )
 
 def build_curve_data_export_string(

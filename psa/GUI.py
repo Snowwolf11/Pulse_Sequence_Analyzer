@@ -32,7 +32,7 @@ from psa.app_backend import (
     write_analysis_export,
 )
 from psa.documentation import DOCUMENTATION_STR
-from psa.app_config import DEFAULTS, get_default_initial_vector
+from psa.app_config import DEFAULTS, get_default_initial_vector, get_default_initial_magnetization
 
 from psa.pulse_string_to_array import *
 
@@ -144,6 +144,7 @@ class PulseSequenceAnalyzerApp:
         self.Scaling = DEFAULTS.scaling_percent
         self.calculationMethod = DEFAULTS.calculation_method
         self.initialVector = get_default_initial_vector()
+        self.initialMagnetization = get_default_initial_magnetization()
         
         self.documentation_str = DOCUMENTATION_STR
 
@@ -511,6 +512,7 @@ class PulseSequenceAnalyzerApp:
             offset_range_khz=float(self.stability_offset_range_text.get()),
             stability_calculation_method=int(self.selected_stability_option.get()),
             initial_vector=self.initialVector,
+            initial_magnetization=self.initialMagnetization,
         )
 
         X, Y, Z, quality, axis, angle = calculate_stability_backend(stability_params)
@@ -600,6 +602,7 @@ class PulseSequenceAnalyzerApp:
             changing_variable=int(self.selected_qualityImages_changingVariable.get()),
             resolution=float(self.qualityImages_Resolution_text.get()),
             progress_callback=self.report_quality_image_progress,
+            initial_magnetization=self.initialMagnetization,
         )
 
         PSQM = calculate_quality_image_backend(quality_image_params)
@@ -845,7 +848,8 @@ class PulseSequenceAnalyzerApp:
     f"InpoFact: {self.InpoFact}\n"
     f"x Expand: {self.x_Expand}\n"
     f"Calculation Method: {self.calculationMethod}\n"
-    f"Initial Vector: {self.initialVector}")
+    f"Initial Vector: {self.initialVector}\n"
+    f"Initial Magnetization: {self.initialMagnetization}")
         return info_error_str
         
     def get_curve_data_str(self, totalRot, phi, numberOfPulses, Axy, Axz, Ayz,CurvInt, TorsInt, TorsInt_abs):
@@ -945,8 +949,8 @@ class MenuWindow:
         self.disp_values.set(self.PS_analyzer.disp_values)
         
         # initialVector
-        label_initialVec = tk.Label(self.menu_window, text="InitialVector:")
-        label_initialVec.grid(row=1, column=0)
+        label_initialVec = tk.Label(self.menu_window, text="Initial vector (error direction / noise axis):")
+        label_initialVec.grid(row=1, column=0, columnspan=2)
         
         self.label_x_initial = tk.Label(self.menu_window, text="x:")
         self.label_x_initial.grid(row=2, column=0)
@@ -968,6 +972,17 @@ class MenuWindow:
         self.entry_z_initial = tk.Entry(self.menu_window)
         self.entry_z_initial.insert(0, self.PS_analyzer.initialVector[2]) 
         self.entry_z_initial.grid(row=4, column=1)
+
+        # initial magnetization (used for PP fidelity and the angle stability mode)
+        label_initialMag = tk.Label(self.menu_window, text="Initial magnetization (PP fidelity, angle):")
+        label_initialMag.grid(row=1, column=2, columnspan=2)
+        self.entry_magnetization = []
+        for k, name in enumerate(("x:", "y:", "z:")):
+            tk.Label(self.menu_window, text=name).grid(row=2 + k, column=2)
+            entry = tk.Entry(self.menu_window)
+            entry.insert(0, self.PS_analyzer.initialMagnetization[k])
+            entry.grid(row=2 + k, column=3)
+            self.entry_magnetization.append(entry)
 
         # Radiobuttons mit calculationMethod
         self.label_initialVec = tk.Label(self.menu_window, text="Calculation Method:")
@@ -1008,6 +1023,7 @@ class MenuWindow:
         
     def save_menu(self):
         self.PS_analyzer.initialVector = np.array([float(self.entry_x_initial.get()), float(self.entry_y_initial.get()), float(self.entry_z_initial.get())])
+        self.PS_analyzer.initialMagnetization = np.array([float(e.get()) for e in self.entry_magnetization])
         selected_option = self.selected_option.get()
         self.PS_analyzer.calculationMethod = int(selected_option)
         #print(self.disp_values)

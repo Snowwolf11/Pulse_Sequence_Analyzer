@@ -55,7 +55,7 @@ from psa.app_backend import (
     write_analysis_export,
 )
 from psa.documentation import DOCUMENTATION_STR
-from psa.app_config import DEFAULTS, get_default_initial_vector
+from psa.app_config import DEFAULTS, get_default_initial_vector, get_default_initial_magnetization
 from psa.pulse_string_to_array import parse_pulse_sequence
 
 np.set_printoptions(threshold=np.inf, linewidth=100000)
@@ -197,7 +197,7 @@ class SettingsDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        vector_group = QGroupBox("Initial Vector")
+        vector_group = QGroupBox("Initial Vector (error direction / noise axis)")
         vector_form = QFormLayout(vector_group)
 
         self.x_spin = QDoubleSpinBox()
@@ -215,6 +215,18 @@ class SettingsDialog(QDialog):
         vector_form.addRow("y:", self.y_spin)
         vector_form.addRow("z:", self.z_spin)
         layout.addWidget(vector_group)
+
+        magnetization_group = QGroupBox("Initial Magnetization (PP fidelity, angle mode)")
+        magnetization_form = QFormLayout(magnetization_group)
+        self.magnetization_spins = []
+        for k, name in enumerate(("x:", "y:", "z:")):
+            spin = QDoubleSpinBox()
+            spin.setRange(-1000000, 1000000)
+            spin.setDecimals(8)
+            spin.setValue(float(parent.initialMagnetization[k]))
+            magnetization_form.addRow(name, spin)
+            self.magnetization_spins.append(spin)
+        layout.addWidget(magnetization_group)
 
         method_group = QGroupBox("Calculation Method")
         method_layout = QHBoxLayout(method_group)
@@ -251,6 +263,7 @@ class SettingsDialog(QDialog):
         self.parent_app.initialVector = np.array(
             [self.x_spin.value(), self.y_spin.value(), self.z_spin.value()]
         )
+        self.parent_app.initialMagnetization = np.array([spin.value() for spin in self.magnetization_spins])
         self.parent_app.calculationMethod = self.method_group.checkedId()
         self.parent_app.disp_values = self.display_values_checkbox.isChecked()
         self.accept()
@@ -341,6 +354,7 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         self.Scaling = DEFAULTS.scaling_percent
         self.calculationMethod = DEFAULTS.calculation_method
         self.initialVector = get_default_initial_vector()
+        self.initialMagnetization = get_default_initial_magnetization()
 
         self.disp_values = False
         self.update_count = 0
@@ -777,6 +791,7 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         self.Scaling = DEFAULTS.scaling_percent
         self.calculationMethod = DEFAULTS.calculation_method
         self.initialVector = get_default_initial_vector()
+        self.initialMagnetization = get_default_initial_magnetization()
 
         self.pulse_sequence_edit.setText(self.PS)
         self.pulse_amplitude_spin.setValue(10)
@@ -970,7 +985,8 @@ class PulseSequenceAnalyzerQt(QMainWindow):
             f"InpoFact: {self.InpoFact}\n"
             f"x Expand: {self.x_Expand}\n"
             f"Calculation Method: {self.calculationMethod}\n"
-            f"Initial Vector: {self.initialVector}"
+            f"Initial Vector: {self.initialVector}\n"
+            f"Initial Magnetization: {self.initialMagnetization}"
         )
 
     def append_info(self, message):
@@ -993,6 +1009,7 @@ class PulseSequenceAnalyzerQt(QMainWindow):
                 offset_range_kHz=self.stability_offset_range.value(),
                 stability_calculation_method=self.stability_group.checkedId(),
                 initial_vector=self.initialVector,
+                initial_magnetization=self.initialMagnetization,
             )
 
         except TypeError:
@@ -1005,6 +1022,7 @@ class PulseSequenceAnalyzerQt(QMainWindow):
                 offset_range_khz=self.stability_offset_range.value(),
                 stability_calculation_method=self.stability_group.checkedId(),
                 initial_vector=self.initialVector,
+                initial_magnetization=self.initialMagnetization,
             )
 
         try:
@@ -1049,6 +1067,7 @@ class PulseSequenceAnalyzerQt(QMainWindow):
                 initial_vector=self.initialVector,
                 calculation_type=self.quality_type_group.checkedId(),
                 changing_variable=self.quality_variable_group.checkedId(),
+                initial_magnetization=self.initialMagnetization,
                 resolution=self.quality_resolution.value(),
                 progress_callback=progress_callback,
             )

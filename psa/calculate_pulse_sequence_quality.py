@@ -1,6 +1,6 @@
 import numpy as np
 
-from psa.rotations import propagate_batch, inverse_rotate, quaternion_to_matrix
+from psa.rotations import propagate_batch, rotate, quaternion_to_matrix
 
 
 def rotation_matrix(axis, angle_deg):
@@ -17,17 +17,21 @@ def rotation_matrix(axis, angle_deg):
 
 
 def calculate_pulse_sequence_quality_batch(PS, T, l, Umax, off, initialVector=np.array([0, 0, 1]),
-                                           shallVec=np.array([0, 0, 1]), calcType=1, target_Rotation=np.eye(3)):
+                                           shallVec=np.array([0, 0, 1]), calcType=1, target_Rotation=np.eye(3),
+                                           initialMagnetization=np.array([0, 0, 1])):
     """Quality values for arrays of amplitudes ``Umax`` and offsets ``off`` (broadcast together).
 
-    calcType 1: (1 + t_final . shallVec) / 2 with t_final = R^T (l * initialVector)
-    calcType 2: (1 + tr(target^T R^T) / 3) / 2
-    calcType 3: 2 * |curve end point| (closedness, unit step length l)
+    calcType 1 (PP/SS): (1 + (R m0) . shallVec) / 2, m0 = normalized initial magnetization,
+               R = Bloch rotation of the pulse, shallVec = target magnetization (unit vector)
+    calcType 2 (UR):    (1 + tr(target^T R^T) / 3) / 2
+    calcType 3:         2 * |error-curve end point| for noise axis ``initialVector`` and step length l
     """
     initialVector = np.asarray(initialVector, dtype=np.float64)
     if calcType == 1:
+        m0 = np.asarray(initialMagnetization, dtype=np.float64)
+        m0 = m0 / np.linalg.norm(m0)
         q = propagate_batch(PS, T, Umax, off)
-        Q = inverse_rotate(q, l * initialVector) @ np.asarray(shallVec, dtype=np.float64)
+        Q = rotate(q, m0) @ np.asarray(shallVec, dtype=np.float64)
         return (1 + Q) / 2
     if calcType == 2:
         q = propagate_batch(PS, T, Umax, off)
@@ -41,6 +45,8 @@ def calculate_pulse_sequence_quality_batch(PS, T, l, Umax, off, initialVector=np
 
 
 def calculate_pulse_sequence_quality(PS, T, l, Umax, off, inpoFact=1, initialVector=np.array([0, 0, 1]),
-                                     shallVec=np.array([0, 0, 1]), calcType=1, target_Rotation=np.eye(3)):
+                                     shallVec=np.array([0, 0, 1]), calcType=1, target_Rotation=np.eye(3),
+                                     initialMagnetization=np.array([0, 0, 1])):
     """Quality value for a single amplitude/offset point (inpoFact is fixed to 1 as before)."""
-    return float(calculate_pulse_sequence_quality_batch(PS, T, l, Umax, off, initialVector, shallVec, calcType, target_Rotation))
+    return float(calculate_pulse_sequence_quality_batch(PS, T, l, Umax, off, initialVector, shallVec, calcType,
+                                                        target_Rotation, initialMagnetization))

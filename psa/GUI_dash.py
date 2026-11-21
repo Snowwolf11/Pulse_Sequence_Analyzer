@@ -19,7 +19,7 @@ from psa.app_backend import (
     build_curve_data_export_string,
     write_analysis_export,
 )
-from psa.app_config import DEFAULTS, get_default_initial_vector
+from psa.app_config import DEFAULTS, get_default_initial_vector, get_default_initial_magnetization
 from psa.documentation import DOCUMENTATION_STR
 from psa.pulse_string_to_array import parse_pulse_sequence
 
@@ -325,6 +325,7 @@ def labeled_input(label, component):
 
 def build_layout():
     initial_vector = get_default_initial_vector()
+    initial_magnetization = get_default_initial_magnetization()
 
     return html.Div(
         style=APP_STYLE,
@@ -486,7 +487,7 @@ def build_layout():
                                     style={"color": "#e5e7eb"},
                                 ),
                             ),
-                            html.H4("Initial Vector"),
+                            html.H4("Initial Vector (error direction / noise axis)"),
                             html.Div(
                                 [
                                     dcc.Input(
@@ -515,6 +516,18 @@ def build_layout():
                                             "marginLeft": "3%",
                                         },
                                     ),
+                                ]
+                            ),
+                            html.H4("Initial Magnetization (PP fidelity, angle mode)"),
+                            html.Div(
+                                [
+                                    dcc.Input(
+                                        id=f"initial-mag-{c}",
+                                        type="number",
+                                        value=float(initial_magnetization[k]),
+                                        style={**INPUT_STYLE, "width": "31%", **({"marginLeft": "3%"} if k else {})},
+                                    )
+                                    for k, c in enumerate("xyz")
                                 ]
                             ),
                         ],
@@ -1047,11 +1060,15 @@ def register_callbacks(app):
         Output("initial-x", "value"),
         Output("initial-y", "value"),
         Output("initial-z", "value"),
+        Output("initial-mag-x", "value"),
+        Output("initial-mag-y", "value"),
+        Output("initial-mag-z", "value"),
         Input("reset-button", "n_clicks"),
         prevent_initial_call=True,
     )
     def reset_defaults(_):
         v = get_default_initial_vector()
+        m = get_default_initial_magnetization()
         return (
             DEFAULTS.pulse_sequence,
             10,
@@ -1065,6 +1082,9 @@ def register_callbacks(app):
             float(v[0]),
             float(v[1]),
             float(v[2]),
+            float(m[0]),
+            float(m[1]),
+            float(m[2]),
         )
 
     @app.callback(
@@ -1204,6 +1224,9 @@ def register_callbacks(app):
         State("initial-x", "value"),
         State("initial-y", "value"),
         State("initial-z", "value"),
+        State("initial-mag-x", "value"),
+        State("initial-mag-y", "value"),
+        State("initial-mag-z", "value"),
         prevent_initial_call=True,
     )
     def calculate_stability_dash(
@@ -1219,6 +1242,9 @@ def register_callbacks(app):
         initial_x,
         initial_y,
         initial_z,
+        mag_x=0.0,
+        mag_y=0.0,
+        mag_z=1.0,
     ):
         if not store:
             return no_update, "Please run Refresh / Calculate first."
@@ -1242,6 +1268,7 @@ def register_callbacks(app):
                 initial_vector=np.array(
                     [float(initial_x), float(initial_y), float(initial_z)]
                 ),
+                initial_magnetization=np.array([float(mag_x), float(mag_y), float(mag_z)]),
             )
 
             X, Y, Z, quality, axis, angle = calculate_stability_backend(
@@ -1278,6 +1305,9 @@ def register_callbacks(app):
         State("quality-calc-type", "value"),
         State("quality-changing-variable", "value"),
         State("quality-resolution", "value"),
+        State("initial-mag-x", "value"),
+        State("initial-mag-y", "value"),
+        State("initial-mag-z", "value"),
         prevent_initial_call=True,
     )
     def calculate_quality_dash(
@@ -1293,6 +1323,9 @@ def register_callbacks(app):
         quality_calc_type,
         quality_changing_variable,
         quality_resolution,
+        mag_x=0.0,
+        mag_y=0.0,
+        mag_z=1.0,
     ):
         try:
             progress_messages = []
@@ -1312,6 +1345,7 @@ def register_callbacks(app):
                 changing_variable=int(quality_changing_variable),
                 resolution=float(quality_resolution),
                 progress_callback=progress_callback,
+                initial_magnetization=np.array([float(mag_x), float(mag_y), float(mag_z)]),
             )
 
             matrix = calculate_quality_image_backend(params)
