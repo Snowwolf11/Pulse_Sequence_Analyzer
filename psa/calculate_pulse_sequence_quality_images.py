@@ -25,7 +25,7 @@ def calculate_pulse_sequence_quality_images(
     PSnames = [f for f in sorted_files if 'bruker' in f]
     PSnumber = len(PSnames)
     offsetRes = round(Range * Resolution/1000)
-    offset = Range / offsetRes
+    variation = np.linspace(-Range / 2, Range / 2, offsetRes)
     PS_1 = np.array(getPulseSequence(os.path.join(dirname, PSnames[-1])))
     if language == "Rust":
         VM_1 = vectors.createVectors_Matrix(PS_1.astype(np.float64), np.float64(T), np.float64(1.0), np.float64(Umax), np.float64(0.0), 1, initialVector.astype(np.float64))
@@ -49,7 +49,7 @@ def calculate_pulse_sequence_quality_images(
             if progress_callback is not None:
                 progress_callback(f"{n1 + 1} von {PSnumber}")
             for n2 in range(offsetRes):
-                Q = calculate_pulse_sequence_quality(PS, T, 1, Umax + (-Range / 2 + (n2 - 1) * offset), 0, 1, np.array(initialVector), shallVec, calcType, language=language)
+                Q = calculate_pulse_sequence_quality(PS, T, 1, Umax + variation[n2], 0, 1, np.array(initialVector), shallVec, calcType, language=language)
                 #print("Q: "+str(Q))
                 if abs(1 - Q) < 10**(-15):
                     Q = 1-10**(-15)
@@ -62,7 +62,7 @@ def calculate_pulse_sequence_quality_images(
             if progress_callback is not None:
                 progress_callback(f"{n1 + 1} von {PSnumber}")
             for n2 in range(offsetRes):
-                Q = calculate_pulse_sequence_quality(PS, T, 1, Umax, -Range / 2 + (n2 - 1) * offset, 1, np.array(initialVector), shallVec, calcType, target_Rotation = R_target.astype(np.float64), language=language)
+                Q = calculate_pulse_sequence_quality(PS, T, 1, Umax, variation[n2], 1, np.array(initialVector), shallVec, calcType, target_Rotation = R_target.astype(np.float64), language=language)
                 if abs(1 - Q) < 10**(-15):
                     Q = 1-10**(-15)
                 #PI[n2, n1] = np.log10(abs(1-Q))

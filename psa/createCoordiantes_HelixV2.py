@@ -10,7 +10,7 @@ def createCoordinates_HelixV2(PS,T,l,maximumAmplitude, offset, inpoFact, initial
     phases = PS[:,1] *  np.pi / 180
 
     starting_tangent = initialVector
-    starting_binormal = np.array([-np.cos(phases[1]), -np.sin(phases[1]), 0])
+    starting_binormal = np.array([-np.cos(phases[0]), -np.sin(phases[0]), 0])
     starting_point = np.array([0, 0, 0])
 
     helix_array = []
