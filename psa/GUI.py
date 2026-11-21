@@ -157,7 +157,6 @@ class PulseSequenceAnalyzerApp:
         self.play_amplitude_bool = False
         self.play_offset_bool = False
 
-        self.calculation_language = DEFAULTS.calculation_language #"Rust or Python"
         
         np.set_printoptions(threshold=np.inf)
                
@@ -467,7 +466,6 @@ class PulseSequenceAnalyzerApp:
             scaling_percent=float(self.param_entries[6].get()),
             calculation_method=self.calculationMethod,
             initial_vector=self.initialVector,
-            calculation_language=self.calculation_language,
         )
 
     def play_amplitude(self):
@@ -513,7 +511,6 @@ class PulseSequenceAnalyzerApp:
             offset_range_khz=float(self.stability_offset_range_text.get()),
             stability_calculation_method=int(self.selected_stability_option.get()),
             initial_vector=self.initialVector,
-            calculation_language=self.calculation_language,
         )
 
         X, Y, Z, quality, axis, angle = calculate_stability_backend(stability_params)
@@ -602,7 +599,6 @@ class PulseSequenceAnalyzerApp:
             calculation_type=int(self.selected_qualityImages_calcType.get()),
             changing_variable=int(self.selected_qualityImages_changingVariable.get()),
             resolution=float(self.qualityImages_Resolution_text.get()),
-            calculation_language=self.calculation_language,
             progress_callback=self.report_quality_image_progress,
         )
 
@@ -989,22 +985,6 @@ class MenuWindow:
         
         self.selected_option.set(self.PS_analyzer.calculationMethod)
 
-        # Radiobuttons mit language
-        self.label_calc_language = tk.Label(self.menu_window, text="Calculation Language:")
-        self.label_calc_language.grid(row=7, column=0)
-        
-        self.selected_language = tk.StringVar()
-        language_frame = tk.Frame(self.menu_window)
-        language_frame.grid(row=8, column=0, columnspan=2)
-
-        language1 = tk.Radiobutton(language_frame, text="Rust", variable=self.selected_language, value="Rust")
-        language1.grid(row=8, column=0)
-
-        language2 = tk.Radiobutton(language_frame, text="Python", variable=self.selected_language, value="Python")
-        language2.grid(row=8, column=2)
-        
-        self.selected_language.set(self.PS_analyzer.calculation_language)
-
 		# Checkbox for Display values
         self.display_values_checkbox = tk.Checkbutton(self.menu_window, text="Display values", variable=self.disp_values)
         self.display_values_checkbox.grid(row=9, column=0, columnspan=2)
@@ -1030,8 +1010,6 @@ class MenuWindow:
         self.PS_analyzer.initialVector = np.array([float(self.entry_x_initial.get()), float(self.entry_y_initial.get()), float(self.entry_z_initial.get())])
         selected_option = self.selected_option.get()
         self.PS_analyzer.calculationMethod = int(selected_option)
-        selected_language = self.selected_language.get()
-        self.PS_analyzer.calculation_language = selected_language
         #print(self.disp_values)
         self.PS_analyzer.disp_values = self.disp_values.get()
         self.menu_window.destroy()

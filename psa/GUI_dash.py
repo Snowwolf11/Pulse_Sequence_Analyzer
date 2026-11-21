@@ -221,7 +221,6 @@ def build_analyzer_params(
     initial_x,
     initial_y,
     initial_z,
-    calculation_language,
 ):
     return AnalyzerParams(
         pulse_sequence=pulse_sequence,
@@ -237,7 +236,6 @@ def build_analyzer_params(
             [float(initial_x), float(initial_y), float(initial_z)],
             dtype=float,
         ),
-        calculation_language=calculation_language,
     )
 
 
@@ -271,8 +269,7 @@ def info_string(update_count, params):
         f"InpoFact: {params.inpo_fact}\n"
         f"x Expand: {params.x_expand}\n"
         f"Calculation Method: {params.calculation_method}\n"
-        f"Initial Vector: {params.initial_vector}\n"
-        f"Calculation Language: {params.calculation_language}"
+        f"Initial Vector: {params.initial_vector}"
     )
 
 
@@ -489,19 +486,6 @@ def build_layout():
                                     style={"color": "#e5e7eb"},
                                 ),
                             ),
-                            labeled_input(
-                                "Calculation Language",
-                                dcc.RadioItems(
-                                    id="calculation-language",
-                                    options=[
-                                        {"label": "Rust", "value": "Rust"},
-                                        {"label": "Python", "value": "Python"},
-                                    ],
-                                    value=DEFAULTS.calculation_language,
-                                    style={"color": "#e5e7eb"},
-                                ),
-                            ),
-
                             html.H4("Initial Vector"),
                             html.Div(
                                 [
@@ -1060,7 +1044,6 @@ def register_callbacks(app):
         Output("offset", "value", allow_duplicate=True),
         Output("scaling", "value", allow_duplicate=True),
         Output("calculation-method", "value"),
-        Output("calculation-language", "value"),
         Output("initial-x", "value"),
         Output("initial-y", "value"),
         Output("initial-z", "value"),
@@ -1079,7 +1062,6 @@ def register_callbacks(app):
             DEFAULTS.offset_hz / 1000,
             DEFAULTS.scaling_percent,
             DEFAULTS.calculation_method,
-            DEFAULTS.calculation_language,
             float(v[0]),
             float(v[1]),
             float(v[2]),
@@ -1109,7 +1091,6 @@ def register_callbacks(app):
         State("initial-x", "value"),
         State("initial-y", "value"),
         State("initial-z", "value"),
-        State("calculation-language", "value"),
     )
     def update_analysis(
         refresh_clicks,
@@ -1126,7 +1107,6 @@ def register_callbacks(app):
         initial_x,
         initial_y,
         initial_z,
-        calculation_language,
     ):
         try:
             update_count = int(update_count or 0) + 1
@@ -1144,7 +1124,6 @@ def register_callbacks(app):
                 initial_x=initial_x,
                 initial_y=initial_y,
                 initial_z=initial_z,
-                calculation_language=calculation_language,
             )
 
             result = analyze_pulse_sequence(params)
@@ -1225,7 +1204,6 @@ def register_callbacks(app):
         State("initial-x", "value"),
         State("initial-y", "value"),
         State("initial-z", "value"),
-        State("calculation-language", "value"),
         prevent_initial_call=True,
     )
     def calculate_stability_dash(
@@ -1241,7 +1219,6 @@ def register_callbacks(app):
         initial_x,
         initial_y,
         initial_z,
-        calculation_language,
     ):
         if not store:
             return no_update, "Please run Refresh / Calculate first."
@@ -1265,7 +1242,6 @@ def register_callbacks(app):
                 initial_vector=np.array(
                     [float(initial_x), float(initial_y), float(initial_z)]
                 ),
-                calculation_language=calculation_language,
             )
 
             X, Y, Z, quality, axis, angle = calculate_stability_backend(
@@ -1302,7 +1278,6 @@ def register_callbacks(app):
         State("quality-calc-type", "value"),
         State("quality-changing-variable", "value"),
         State("quality-resolution", "value"),
-        State("calculation-language", "value"),
         prevent_initial_call=True,
     )
     def calculate_quality_dash(
@@ -1318,7 +1293,6 @@ def register_callbacks(app):
         quality_calc_type,
         quality_changing_variable,
         quality_resolution,
-        calculation_language,
     ):
         try:
             progress_messages = []
@@ -1337,7 +1311,6 @@ def register_callbacks(app):
                 calculation_type=int(quality_calc_type),
                 changing_variable=int(quality_changing_variable),
                 resolution=float(quality_resolution),
-                calculation_language=calculation_language,
                 progress_callback=progress_callback,
             )
 
@@ -1488,7 +1461,6 @@ def register_callbacks(app):
         State("initial-x", "value"),
         State("initial-y", "value"),
         State("initial-z", "value"),
-        State("calculation-language", "value"),
         prevent_initial_call=True,
     )
     def export_directory_data(
@@ -1506,7 +1478,6 @@ def register_callbacks(app):
         initial_x,
         initial_y,
         initial_z,
-        calculation_language,
     ):
         try:
             base_output_dir = next_numbered_dir(
@@ -1535,7 +1506,6 @@ def register_callbacks(app):
                     initial_x=initial_x,
                     initial_y=initial_y,
                     initial_z=initial_z,
-                    calculation_language=calculation_language,
                 )
 
                 result = analyze_pulse_sequence(params)

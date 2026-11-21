@@ -1,8 +1,8 @@
-dash
-plotly
+numpy
+scipy
+matplotlib
 mplcursors
 mpld3
-setuptools
-wheel
-build
-setuptools-rust
+PySide6<6.10
+dash
+plotly

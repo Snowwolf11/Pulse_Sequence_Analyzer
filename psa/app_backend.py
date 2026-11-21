@@ -30,7 +30,6 @@ class AnalyzerParams:
     scaling_percent: float
     calculation_method: int
     initial_vector: np.ndarray
-    calculation_language: str
 
 
 @dataclass
@@ -83,7 +82,6 @@ def analyze_pulse_sequence(params: AnalyzerParams) -> AnalysisResult:
         xExpand=params.x_expand,
         calculationMethod=params.calculation_method,
         initialVector=params.initial_vector,
-        language=params.calculation_language,
     )
 
     totalRot = angle_between_vectors(VM[0, :], VM[-1, :])
@@ -144,7 +142,6 @@ class StabilityParams:
     offset_range_khz: float
     stability_calculation_method: int
     initial_vector: np.ndarray
-    calculation_language: str
 
 
 def calculate_stability_backend(params: StabilityParams):
@@ -157,7 +154,6 @@ def calculate_stability_backend(params: StabilityParams):
         offsetRange_kHz=params.offset_range_khz,
         stabilityCalculationMethod=params.stability_calculation_method,
         initialVector=params.initial_vector,
-        language=params.calculation_language,
     )
 
 
@@ -171,7 +167,6 @@ class QualityImageParams:
     calculation_type: int
     changing_variable: int
     resolution: float
-    calculation_language: str
     progress_callback: object = None
 
 def calculate_quality_image_backend(params: QualityImageParams):
@@ -184,7 +179,6 @@ def calculate_quality_image_backend(params: QualityImageParams):
         calcType=params.calculation_type,
         changingVariable=params.changing_variable,
         Resolution=params.resolution,
-        language=params.calculation_language,
         progress_callback=params.progress_callback,
     )
 
@@ -276,7 +270,11 @@ def write_analysis_export(
         file.write(curve_data_string)
 
     if error_curve_figure is not None:
-        mpld3.save_html(
-            error_curve_figure,
-            os.path.join(output_dir, "Error_Curve_plot.html"),
-        )
+        try:
+            mpld3.save_html(
+                error_curve_figure,
+                os.path.join(output_dir, "Error_Curve_plot.html"),
+            )
+        except Exception:
+            # mpld3 cannot export 3D axes with matplotlib >= 3.8 (Axes3D.get_frame_on is None)
+            error_curve_figure.savefig(os.path.join(output_dir, "Error_Curve_plot.png"), dpi=150)

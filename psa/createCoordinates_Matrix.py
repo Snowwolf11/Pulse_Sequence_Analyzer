@@ -3,36 +3,14 @@
 """
 @author: leon
 """
-import vectors
-
-from psa.createVectors_Matrix import *
 import numpy as np
-import time
 
-def createCoordinates_Matrix(PS,T,l,Umax,offset,inpoFact,initialVector, language = "Rust"):
-    #all inputs eather floats or ndarrays
-    #createCoordinateMatrix create a Matrix where each wor accords to a set of
-    #3D Coordinates
-    #   Detailed explanation goes here
-    
-    #a = time.time()
-    if language =="Rust":
-        VM = vectors.createVectors_Matrix(PS.astype(np.float64),np.float64(T),np.float64(l),np.float64(Umax),np.float64(offset),int(inpoFact),initialVector.astype(np.float64))
-    elif language == "Python":
-        VM = createVectors_Matrix_python(PS.astype(np.float64),np.float64(T),np.float64(l),np.float64(Umax),np.float64(offset),int(inpoFact),initialVector.astype(np.float64))
-    #b = time.time()
-    #print("Time: " + str(b-a))
-    h = np.ones((np.shape(VM)[0]+1,3))
-    cn=np.array([0,0,0])      #first Coordinates
-    h[0,:]=cn
-    if language =="Rust":
-        for n in range(np.shape(VM)[0]):
-            cn=cn+VM[n,:]      #Coordinates = Coordinates of point befor + the fitting Vector from VM
-            h[n+1,:]=cn
-    elif language =="Python":
-        for n in range(np.shape(VM)[0]):
-            cn=cn+VM[n]      #Coordinates = Coordinates of point befor + the fitting Vector from VM
-            h[n+1,:]=cn
-    CM=h
+from psa.rotations import tangent_vectors
+
+
+def createCoordinates_Matrix(PS, T, l, Umax, offset, inpoFact, initialVector):
+    """Error-curve points: cumulative sum of the tangent vectors, starting at the origin."""
+    VM = tangent_vectors(PS, T, l, Umax, offset, int(inpoFact), initialVector)
+    CM = np.zeros((len(VM) + 1, 3))
+    np.cumsum(VM, axis=0, out=CM[1:])
     return CM
-    

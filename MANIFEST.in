@@ -1,4 +1,0 @@
-include vectors/Cargo.toml
-recursive-include vectors *.rs
-include totalRotMatrix/Cargo.toml
-recursive-include totalRotMatrix *.rs

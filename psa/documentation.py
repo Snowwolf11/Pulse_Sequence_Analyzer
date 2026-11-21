@@ -24,9 +24,6 @@ Define a pulse sequence as a list of rectangular pulses and phase ramps, using t
 Menu / Settings
 - Calculation method: **Rotation Matrix** or **Helix**.
 - Initial condition: select the **error direction**.
-- Backend / language:
-  • **Rust** — much faster but requires additional setup.
-  • **Python** — runs out of the box but is slower.
 
 Error-Curve Window
 Plots the Error curve. Updates when you press **Refresh**, hit **Enter**, or change Offset/Amplitude.

@@ -1,25 +1,26 @@
 [build-system]
-requires = ["setuptools", "setuptools-rust"]
+requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "psa"
-version = "1.0"
+version = "1.1"
+description = "Pulse Sequence Analyzer: space-curve analysis of NMR pulse sequences"
+requires-python = ">=3.8,<3.14"  # PySide6<6.10 has no wheels for 3.14+
 dependencies = [
     "numpy",
+    "scipy",
     "matplotlib",
     "mplcursors",
     "mpld3",
-    "scipy",
+    "PySide6<6.10",  # 6.10+ needs macOS >= 14.4
+    "dash",
+    "plotly",
 ]
 
-[tool.setuptools.packages]
-find = { where = ["."] }
+[project.optional-dependencies]
+test = ["pytest"]
 
-[[tool.setuptools-rust.ext-modules]]
-target = "vectors._lib"
-path = "vectors/Cargo.toml"
-
-[[tool.setuptools-rust.ext-modules]]
-target = "totalRotMatrix._lib"
-path = "totalRotMatrix/Cargo.toml"
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["psa*"]

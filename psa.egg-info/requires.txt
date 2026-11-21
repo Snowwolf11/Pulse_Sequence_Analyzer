@@ -1,5 +1,0 @@
-numpy
-matplotlib
-mplcursors
-mpld3
-scipy

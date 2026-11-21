@@ -231,21 +231,6 @@ class SettingsDialog(QDialog):
             self.helix_radio.setChecked(True)
         layout.addWidget(method_group)
 
-        language_group = QGroupBox("Calculation Language")
-        language_layout = QHBoxLayout(language_group)
-        self.language_group = QButtonGroup(self)
-        self.rust_radio = QRadioButton("Rust")
-        self.python_radio = QRadioButton("Python")
-        self.language_group.addButton(self.rust_radio)
-        self.language_group.addButton(self.python_radio)
-        language_layout.addWidget(self.rust_radio)
-        language_layout.addWidget(self.python_radio)
-        if parent.calculation_language == "Rust":
-            self.rust_radio.setChecked(True)
-        else:
-            self.python_radio.setChecked(True)
-        layout.addWidget(language_group)
-
         self.display_values_checkbox = QCheckBox("Display values")
         self.display_values_checkbox.setChecked(parent.disp_values)
         layout.addWidget(self.display_values_checkbox)
@@ -267,9 +252,6 @@ class SettingsDialog(QDialog):
             [self.x_spin.value(), self.y_spin.value(), self.z_spin.value()]
         )
         self.parent_app.calculationMethod = self.method_group.checkedId()
-        self.parent_app.calculation_language = (
-            "Rust" if self.rust_radio.isChecked() else "Python"
-        )
         self.parent_app.disp_values = self.display_values_checkbox.isChecked()
         self.accept()
 
@@ -359,7 +341,6 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         self.Scaling = DEFAULTS.scaling_percent
         self.calculationMethod = DEFAULTS.calculation_method
         self.initialVector = get_default_initial_vector()
-        self.calculation_language = DEFAULTS.calculation_language
 
         self.disp_values = False
         self.update_count = 0
@@ -796,7 +777,6 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         self.Scaling = DEFAULTS.scaling_percent
         self.calculationMethod = DEFAULTS.calculation_method
         self.initialVector = get_default_initial_vector()
-        self.calculation_language = DEFAULTS.calculation_language
 
         self.pulse_sequence_edit.setText(self.PS)
         self.pulse_amplitude_spin.setValue(10)
@@ -827,7 +807,6 @@ class PulseSequenceAnalyzerQt(QMainWindow):
             scaling_percent=self.scaling_spin.value(),
             calculation_method=self.calculationMethod,
             initial_vector=self.initialVector,
-            calculation_language=self.calculation_language,
         )
 
     def update_values_from_params(self, params):
@@ -991,8 +970,7 @@ class PulseSequenceAnalyzerQt(QMainWindow):
             f"InpoFact: {self.InpoFact}\n"
             f"x Expand: {self.x_Expand}\n"
             f"Calculation Method: {self.calculationMethod}\n"
-            f"Initial Vector: {self.initialVector}\n"
-            f"Calculation Language: {self.calculation_language}"
+            f"Initial Vector: {self.initialVector}"
         )
 
     def append_info(self, message):
@@ -1015,7 +993,6 @@ class PulseSequenceAnalyzerQt(QMainWindow):
                 offset_range_kHz=self.stability_offset_range.value(),
                 stability_calculation_method=self.stability_group.checkedId(),
                 initial_vector=self.initialVector,
-                calculation_language=self.calculation_language,
             )
 
         except TypeError:
@@ -1028,7 +1005,6 @@ class PulseSequenceAnalyzerQt(QMainWindow):
                 offset_range_khz=self.stability_offset_range.value(),
                 stability_calculation_method=self.stability_group.checkedId(),
                 initial_vector=self.initialVector,
-                calculation_language=self.calculation_language,
             )
 
         try:
@@ -1074,7 +1050,6 @@ class PulseSequenceAnalyzerQt(QMainWindow):
                 calculation_type=self.quality_type_group.checkedId(),
                 changing_variable=self.quality_variable_group.checkedId(),
                 resolution=self.quality_resolution.value(),
-                calculation_language=self.calculation_language,
                 progress_callback=progress_callback,
             )
 

@@ -1,39 +1,32 @@
-import vectors
-import totalRotMatrix
-
-from psa.createVectors_Matrix import *
-from psa.calculate_Rtot import *
-from psa.calculate_pulse_sequence_quality import*
-
 import time
 
 import numpy as np
-#46.5 vs 33
-def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRange_kHz=20, stabilityCalculationMethod=1, initialVector=np.array([0,0,1]), language = "Rust"):
+
+from psa.rotations import tangent_vectors, inverse_total_rotation, propagate_batch, inverse_rotate
+from psa.calculate_pulse_sequence_quality import calculate_pulse_sequence_quality_batch
+
+
+def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRange_kHz=20, stabilityCalculationMethod=1, initialVector=np.array([0,0,1])):
+    """Quality over a 200 x 200 grid of amplitude scaling x offset.
+
+    Z[j, i] belongs to offset j and amplitude scaling i (as X, Y from np.meshgrid).
+    Methods: 1 = PP/SS (final tangent vs. target vector), 2 = UR (total rotation vs. closest
+    canonical rotation), 3 = polar angle of the final tangent in degrees.
+    """
     a = time.time()
-    
+    PS = np.asarray(PS, dtype=np.float64)
+    initialVector = np.asarray(initialVector, dtype=np.float64)
+
     offsetRange = 1e3 * np.linspace(-offsetRange_kHz/2, offsetRange_kHz/2, 200)
-    
+
     scalingRange = np.linspace(1-scalingRange_percent/200,  1+scalingRange_percent/200, 200)
     scalingRange *= Umax
-    
-    #print("off: "+str(offsetRange))
-    #print("amp: "+str(scalingRange))
+
     X, Y = np.meshgrid(scalingRange, offsetRange)
-    Z = np.ones_like(X)
-    counts = 0
-    counto = 0
-    countZ = 0
-    
-    if language == "Rust":
-        VM =  vectors.createVectors_Matrix(PS.astype(np.float64),np.float64(T),np.float64(l),np.float64(Umax),np.float64(0),1,initialVector.astype(np.float64))
-        Rtot_on_res = totalRotMatrix.create_Rtot(PS.astype(np.float64), np.float64(T), np.float64(Umax), np.float64(0.0), 1)
-        medianVec = VM[-1,:]
-    elif language == "Python":
-        VM =  createVectors_Matrix_python(PS.astype(np.float64),np.float64(T),np.float64(l),np.float64(Umax),np.float64(0),1,initialVector.astype(np.float64))
-        Rtot_on_res = create_Rtot_python(PS.astype(np.float64), np.float64(T), np.float64(Umax), np.float64(0.0), 1)
-        medianVec = VM[-1]
-    
+
+    medianVec = tangent_vectors(PS, T, l, Umax, 0.0, 1, initialVector)[-1]
+    Rtot_on_res = inverse_total_rotation(PS, T, Umax, 0.0, 1)
+
     if np.linalg.norm(medianVec[2]) > 5 * (np.linalg.norm(medianVec[1]) + np.linalg.norm(medianVec[0])):
         if medianVec[2] > 0:
             shallVec = np.array([0, 0, 1])
@@ -41,47 +34,19 @@ def calculate_curve_stability(PS, T, l, Umax, scalingRange_percent=20, offsetRan
             shallVec = np.array([0, 0, -1])
     else:
         shallVec = medianVec
-    
+
     axis, angle, err_deg, R_target = closest_canonical_rotation(Rtot_on_res, return_matrix=True)
 
-    if stabilityCalculationMethod == 1: #app.SSButton.Value == 1:	#################################
-        for (i,n) in np.ndenumerate(scalingRange):
-            counts += 1
-            for (j,n2) in np.ndenumerate(offsetRange):
-                counto += 1
-                if counto > len(offsetRange):
-                    counto = 1
-                Z[j,i] = calculate_pulse_sequence_quality(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(n), np.float64(n2), 1, initialVector.astype(np.float64), shallVec.astype(np.float64), 1, language=language)
-                countZ += Z[j, i]
-    
-    if stabilityCalculationMethod == 2: #app.URButton.Value == 1:	###############################
-        for (i,n) in np.ndenumerate(scalingRange):
-            counts += 1
-            for (j,n2) in np.ndenumerate(offsetRange):
-                counto += 1
-                if counto > len(offsetRange):
-                    counto = 1
-                Z[j,i] = calculate_pulse_sequence_quality(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(n), np.float64(n2), 1, initialVector.astype(np.float64), shallVec.astype(np.float64), 2, target_Rotation = R_target.astype(np.float64), language=language)
-                countZ += Z[j, i]
-                
-                #(Rtot*ex
-                
-    if stabilityCalculationMethod == 3: #app.AngleButton.Value == 1:	###################################
-        for (i,n) in np.ndenumerate(scalingRange):
-            counts += 1
-            for (j,n2) in np.ndenumerate(offsetRange):
-                counto += 1
-                if counto > len(offsetRange):
-                    counto = 1
-                if language == "Rust":
-                    VM = vectors.createVectors_Matrix(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(n), np.float64(n2), 1, initialVector.astype(np.float64))
-                    Z[j, i] = np.arctan2(np.sqrt(VM[-1,0]**2 + VM[-1,1]**2), VM[-1,2]) * 180 / np.pi
-                elif language == "Python":
-                    VM = createVectors_Matrix_python(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(n), np.float64(n2), 1, initialVector.astype(np.float64))
-                    Z[j, i] = np.arctan2(np.sqrt(VM[-1][0]**2 + VM[-1][1]**2), VM[-1][2]) * 180 / np.pi
-                countZ += Z[j, i]
-    
-    quality = countZ / (counto * counts)
+    Z = np.ones_like(X)
+    if stabilityCalculationMethod == 1:
+        Z = calculate_pulse_sequence_quality_batch(PS, T, l, X, Y, initialVector, shallVec, 1)
+    elif stabilityCalculationMethod == 2:
+        Z = calculate_pulse_sequence_quality_batch(PS, T, l, X, Y, initialVector, shallVec, 2, target_Rotation=R_target)
+    elif stabilityCalculationMethod == 3:
+        VM_end = inverse_rotate(propagate_batch(PS, T, X, Y), l * initialVector)
+        Z = np.arctan2(np.sqrt(VM_end[..., 0]**2 + VM_end[..., 1]**2), VM_end[..., 2]) * 180 / np.pi
+
+    quality = float(np.mean(Z))
 
     b = time.time()
     print("Time: " + str(b-a))

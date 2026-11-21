@@ -1,12 +1,12 @@
-from psa.calculate_pulse_sequence_quality import *
-from psa.calculate_curve_stability import *
-from psa.getPulseSequence import *
-from psa.calculate_Rtot import *
-from psa.createVectors_Matrix import *
-
-import vectors
 import os
+
 import numpy as np
+
+from psa.calculate_pulse_sequence_quality import calculate_pulse_sequence_quality_batch
+from psa.calculate_curve_stability import closest_canonical_rotation
+from psa.getPulseSequence import getPulseSequence
+from psa.rotations import tangent_vectors, inverse_total_rotation
+
 
 def calculate_pulse_sequence_quality_images(
     dirname,
@@ -17,58 +17,40 @@ def calculate_pulse_sequence_quality_images(
     calcType,
     changingVariable,
     Resolution,
-    language="Rust",
     progress_callback=None,
 ):
+    """log10(|1 - quality|) for every .bruker file in ``dirname`` (columns) over an amplitude
+    (changingVariable 1) or offset (changingVariable 2) scan of width ``Range`` Hz (rows)."""
     files = os.listdir(dirname)
     sorted_files = sorted(files)
     PSnames = [f for f in sorted_files if 'bruker' in f]
     PSnumber = len(PSnames)
     offsetRes = round(Range * Resolution/1000)
     variation = np.linspace(-Range / 2, Range / 2, offsetRes)
+    initialVector = np.asarray(initialVector, dtype=np.float64)
+
     PS_1 = np.array(getPulseSequence(os.path.join(dirname, PSnames[-1])))
-    if language == "Rust":
-        VM_1 = vectors.createVectors_Matrix(PS_1.astype(np.float64), np.float64(T), np.float64(1.0), np.float64(Umax), np.float64(0.0), 1, initialVector.astype(np.float64))
-        Rtot_on_res = totalRotMatrix.create_Rtot(PS_1.astype(np.float64), np.float64(T), np.float64(Umax), np.float64(0.0), 1)
-        shallVec = round_vector(VM_1[-1,:], 45)#np.array([0, 0, -1])  # Define shallVec as a numpy array
-        print("Original Vector:", VM_1[-1,:])
-    elif language == "Python":
-        VM_1 = createVectors_Matrix_python(PS_1.astype(np.float64), np.float64(T), np.float64(1.0), np.float64(Umax), np.float64(0.0), 1, initialVector.astype(np.float64))
-        Rtot_on_res = create_Rtot_python(PS_1.astype(np.float64), np.float64(T), np.float64(Umax), np.float64(0.0), 1)
-        shallVec = round_vector(VM_1[-1], 45)#np.array([0, 0, -1])  # Define shallVec as a numpy array
-        print("Original Vector:", VM_1[-1])
+    VM_1 = tangent_vectors(PS_1, T, 1.0, Umax, 0.0, 1, initialVector)
+    Rtot_on_res = inverse_total_rotation(PS_1, T, Umax, 0.0, 1)
+    shallVec = round_vector(VM_1[-1], 45)
+    print("Original Vector:", VM_1[-1])
 
     axis, angle, err_deg, R_target = closest_canonical_rotation(Rtot_on_res, return_matrix=True)
 
     print("Rounded Cartesian Vector:", shallVec)
 
-    if changingVariable == 1:
-        PI = np.ones((offsetRes, PSnumber))
+    PI = np.ones((offsetRes, PSnumber))
+    if changingVariable in (1, 2):
         for n1 in range(PSnumber):
             PS = np.array(getPulseSequence(os.path.join(dirname, PSnames[n1])))
             if progress_callback is not None:
                 progress_callback(f"{n1 + 1} von {PSnumber}")
-            for n2 in range(offsetRes):
-                Q = calculate_pulse_sequence_quality(PS, T, 1, Umax + variation[n2], 0, 1, np.array(initialVector), shallVec, calcType, language=language)
-                #print("Q: "+str(Q))
-                if abs(1 - Q) < 10**(-15):
-                    Q = 1-10**(-15)
-                PI[n2, n1] = np.log10(abs(1 - Q))
-
-    if changingVariable == 2:
-        PI = np.ones((offsetRes, PSnumber))
-        for n1 in range(PSnumber):
-            PS = np.array(getPulseSequence(os.path.join(dirname, PSnames[n1])))
-            if progress_callback is not None:
-                progress_callback(f"{n1 + 1} von {PSnumber}")
-            for n2 in range(offsetRes):
-                Q = calculate_pulse_sequence_quality(PS, T, 1, Umax, variation[n2], 1, np.array(initialVector), shallVec, calcType, target_Rotation = R_target.astype(np.float64), language=language)
-                if abs(1 - Q) < 10**(-15):
-                    Q = 1-10**(-15)
-                #PI[n2, n1] = np.log10(abs(1-Q))
-                PI[n2, n1] = np.log10(abs(1-Q))
-    #PI = mean_deviation(PI, round(Resolution*4))
-    #print(Resolution)
+            if changingVariable == 1:
+                Q = calculate_pulse_sequence_quality_batch(PS, T, 1, Umax + variation, 0.0, initialVector, shallVec, calcType)
+            else:
+                Q = calculate_pulse_sequence_quality_batch(PS, T, 1, Umax, variation, initialVector, shallVec, calcType, target_Rotation=R_target)
+            Q = np.where(np.abs(1 - Q) < 10**(-15), 1 - 10**(-15), Q)
+            PI[:, n1] = np.log10(np.abs(1 - Q))
     return PI
 
 def round_vector(v, nearest_degree):

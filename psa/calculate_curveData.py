@@ -1,5 +1,8 @@
 import numpy as np
 
+# np.trapz was renamed to np.trapezoid in NumPy 2.0 and removed later
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz
+
 def number_of_pulses(PS_mat, inpoFact):
     number_of_pulses = PS_mat.shape[0]/inpoFact
     return number_of_pulses 
@@ -43,7 +46,7 @@ def calculate_closed_curve_area_app(CM2D, close_curve=False):
     if close_curve:
         CM2D = np.vstack((CM2D, CM2D[0]))  # closes curve if close_curve is True
 
-    A = np.trapz(CM2D[:, 1], x=CM2D[:, 0])  # calculate the area using trapezoidal integration
+    A = _trapezoid(CM2D[:, 1], x=CM2D[:, 0])  # calculate the area using trapezoidal integration
     return A
     
 def curvature_torsion_3d(curve):
@@ -66,9 +69,9 @@ def curvature_torsion_3d(curve):
     arc_length = np.cumsum(dp_length)
 
     # Calculate integrated curvature and torsion
-    integrated_curvature = np.trapz(curvature, x=arc_length)
-    integrated_torsion = np.trapz(torsion, x=arc_length)
-    integrated_absolut_torsion = np.trapz(abs(torsion), x=arc_length)
+    integrated_curvature = _trapezoid(curvature, x=arc_length)
+    integrated_torsion = _trapezoid(torsion, x=arc_length)
+    integrated_absolut_torsion = _trapezoid(abs(torsion), x=arc_length)
     
     # Calculate average curvature and torsion
     avg_curvature = np.mean(curvature)

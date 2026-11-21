@@ -13,7 +13,6 @@ class AppDefaults:
     offset_hz: float = 0.0
     scaling_percent: float = 100.0
     calculation_method: int = 1
-    calculation_language: str = "Rust"
 
     export_directory: str = "/Users/leon/Desktop/Physik/Glaser"
 

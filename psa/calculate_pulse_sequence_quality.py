@@ -1,9 +1,7 @@
-import vectors
-import totalRotMatrix
-
-from psa.createCoordinates_Matrix import *
-from psa.calculate_Rtot import *
 import numpy as np
+
+from psa.rotations import propagate_batch, inverse_rotate, quaternion_to_matrix
+
 
 def rotation_matrix(axis, angle_deg):
     axis = np.asarray(axis, dtype=float)
@@ -17,29 +15,32 @@ def rotation_matrix(axis, angle_deg):
         [z*x*C - y*s,   z*y*C + x*s, c + z*z*C]
     ])
 
-def calculate_pulse_sequence_quality(PS, T, l, Umax, off, inpoFact=1 , initialVector = np.array([0,0,1]), shallVec = np.array([0,0,1]), calcType = 1, target_Rotation = np.eye(3), language = "Rust"):
-    
+
+def calculate_pulse_sequence_quality_batch(PS, T, l, Umax, off, initialVector=np.array([0, 0, 1]),
+                                           shallVec=np.array([0, 0, 1]), calcType=1, target_Rotation=np.eye(3)):
+    """Quality values for arrays of amplitudes ``Umax`` and offsets ``off`` (broadcast together).
+
+    calcType 1: (1 + t_final . shallVec) / 2 with t_final = R^T (l * initialVector)
+    calcType 2: (1 + tr(target^T R^T) / 3) / 2
+    calcType 3: 2 * |curve end point| (closedness, unit step length l)
+    """
+    initialVector = np.asarray(initialVector, dtype=np.float64)
     if calcType == 1:
-       if language == "Rust":
-         VM = vectors.createVectors_Matrix(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(Umax), np.float64(off), 1, initialVector.astype(np.float64))
-         Q = np.dot(VM[-1,:], shallVec)
-       elif language == "Python":
-         VM = createVectors_Matrix_python(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(Umax), np.float64(off), 1, initialVector.astype(np.float64))
-         Q = np.dot(VM[-1], shallVec)
-       F =  (1+Q)/2 #so that resulting fidelity is in the range 0-1.  
+        q = propagate_batch(PS, T, Umax, off)
+        Q = inverse_rotate(q, l * initialVector) @ np.asarray(shallVec, dtype=np.float64)
+        return (1 + Q) / 2
+    if calcType == 2:
+        q = propagate_batch(PS, T, Umax, off)
+        Rtot = np.swapaxes(quaternion_to_matrix(q), -1, -2)
+        Q = np.einsum("ij,...ij->...", np.asarray(target_Rotation, dtype=np.float64), Rtot) / 3.0
+        return (1 + Q) / 2
+    if calcType == 3:
+        _, end_point = propagate_batch(PS, T, Umax, off, initialVector=initialVector, l=l)
+        return 2 * np.linalg.norm(end_point, axis=-1)
+    raise ValueError("calcType must be 1, 2 or 3")
 
-    elif calcType == 2:
-       if language == "Rust":
-         Rtot = totalRotMatrix.create_Rtot(PS.astype(np.float64), np.float64(T), np.float64(Umax), np.float64(off), 1)
-       elif language == "Python":
-         Rtot = create_Rtot_python(PS.astype(np.float64), np.float64(T), np.float64(Umax), np.float64(off), 1)
-       Q = 1/3 * (np.dot(Rtot[:,0], [1, 0, 0]) + np.dot(Rtot[:,1], [0, 1, 0]) + np.dot(Rtot[:,2], [0, 0, 1]))  # for 0° & 360° Pulse
-       Q = np.trace(target_Rotation.T @ Rtot) / 3.0
-       F = (1+Q)/2  
-    
-    elif calcType == 3:  #geschlossenheit
-       CM = createCoordinates_Matrix(PS.astype(np.float64), np.float64(T), np.float64(l), np.float64(Umax), np.float64(off), 1, initialVector.astype(np.float64), language=language)
-       Q = 2*np.sqrt(np.dot(CM[-1,:], CM[-1,:]))#/(l*(PS.shape[0]+1))
-       F = Q
 
-    return F
+def calculate_pulse_sequence_quality(PS, T, l, Umax, off, inpoFact=1, initialVector=np.array([0, 0, 1]),
+                                     shallVec=np.array([0, 0, 1]), calcType=1, target_Rotation=np.eye(3)):
+    """Quality value for a single amplitude/offset point (inpoFact is fixed to 1 as before)."""
+    return float(calculate_pulse_sequence_quality_batch(PS, T, l, Umax, off, initialVector, shallVec, calcType, target_Rotation))
