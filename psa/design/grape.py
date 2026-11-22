@@ -11,7 +11,12 @@ w N sum |u_(k+1) - u_k|^2, and one-sided limits of the amplitude rate (%/µs) an
 weighted by the amplitudes so that phase jumps at zero amplitude are free) that cost nothing below the
 limit (squared hinge). Soft terms (smoothness, stay close) are lowered stage by stage (x0.1) until the goals
 are reached exactly; each stage starts from the previous, smooth result.
-Exploration: several starts (seeded perturbations) in parallel processes; the best one is kept.
+Coarse to fine (optional): first stages on few spline points (large-scale shape only), then the chosen controls.
+
+Exploration (Search): a population of starts (perturbations of the start pulse, smooth or white, or random
+pulses) refined by GRAPE in rounds; successive halving keeps the best fraction and doubles the budget each
+round; optional crossover children of survivors (blends in the control variables, experimental); then kicks
+of the best result (perturb, re-optimize, keep if better, or with a temperature sometimes if worse).
 
 Robustness (choose one):
     local      Taylor orders of the detuning error (A1..A3, SCQC) and optionally first-order B1 scaling,
@@ -71,6 +76,19 @@ class GrapeConfig:
     limit_weight: float = 1.0                    # weight of the rate-limit rows
     n_starts: int = 1                            # multi-start: number of starts
     multistart_noise: float = 0.5                # perturbation of starts 2, 3, ... (in the squashed variables)
+    start_pool: str = "perturb"                  # starts 2, 3, ...: "perturb" the start pulse, "random" pulses, "mix"
+    noise_correlation_us: float = 0.0            # correlation time of start / kick noise (0 = white noise)
+    screen_rounds: int = 0                       # successive-halving rounds (0 = every start gets the full budget)
+    screen_nfev: int = 40                        # evaluations per candidate in round 1 (then / keep_fraction per round)
+    keep_fraction: float = 0.5                   # fraction of the candidates kept after each round
+    crossover_rate: float = 0.0                  # dropped candidates replaced by crossover children (fraction, experimental)
+    n_kicks: int = 0                             # kicks of the best result (perturb + re-optimize)
+    kick_size: float = 0.3                       # kick perturbation (same units as the spread)
+    kick_temperature: float = 0.0                # accept a worse kick with exp(-Δlog10(residual) / T) (0 = never)
+    coarse_levels: List[int] = field(default_factory=list)   # spline points of coarse stages before the controls
+    reweight_rounds: int = 0                     # Lawson rounds: raise the weights of the worst points (0 = off)
+    reweight_power: float = 0.5                  # weight update w <- w (e / mean e)^power (1: classic Lawson, may oscillate)
+    start_kind: str = "perturb"                  # set by variant(): "perturb" or "random"
 
     def to_dict(self):
         return {k: (list(v) if isinstance(v, (list, tuple)) else v) for k, v in self.__dict__.items()}
@@ -106,6 +124,22 @@ class GrapeConfig:
             raise ValueError("weights and rate limits must not be negative")
         if int(self.n_starts) < 1:
             raise ValueError("at least one start is needed")
+        if self.start_pool not in ("perturb", "random", "mix"):
+            raise ValueError("the start pool must be 'perturb', 'random' or 'mix'")
+        if min(self.noise_correlation_us, self.kick_size, self.kick_temperature, self.crossover_rate) < 0:
+            raise ValueError("noise correlation, kick size, temperature and crossover rate must not be negative")
+        if int(self.screen_rounds) < 0 or int(self.n_kicks) < 0:
+            raise ValueError("rounds and kicks must not be negative")
+        if int(self.screen_nfev) < 2:
+            raise ValueError("the first screening round needs at least 2 evaluations")
+        if not 0 < self.keep_fraction < 1:
+            raise ValueError("the kept fraction must be between 0 and 1")
+        if self.crossover_rate > 1:
+            raise ValueError("the crossover rate must be at most 1")
+        if int(self.reweight_rounds) < 0 or self.reweight_power <= 0:
+            raise ValueError("reweighting needs rounds >= 0 and a positive power")
+        if any(int(m) < 4 for m in self.coarse_levels):
+            raise ValueError("coarse levels need at least 4 spline points")
         if self.gate == "PP" and (np.linalg.norm(self.m0) == 0 or np.linalg.norm(self.m_target) == 0):
             raise ValueError("PP vectors must not be zero")
         if self.gate == "UR" and np.linalg.norm(self.target_axis) == 0:
@@ -116,8 +150,18 @@ class GrapeConfig:
         if i == 0:
             return self
         d = self.to_dict()
-        d.update(seed=int(self.seed) + i, start_noise=self.multistart_noise)
+        rand = self.start_pool == "random" or (self.start_pool == "mix" and i % 2 == 1)
+        d.update(seed=int(self.seed) + i, start_noise=self.multistart_noise, start_kind="random" if rand else "perturb")
         return GrapeConfig.from_dict(d)
+
+    def replace(self, **kw):
+        d = self.to_dict()
+        d.update(kw)
+        return GrapeConfig.from_dict(d)
+
+    def n_points(self):
+        """Number of points that reweighting balances: offsets (local) or grid points (broadband)."""
+        return len(self.offsets_hz) if self.mode == "local" else int(self.bb_offset_n) * int(self.bb_scale_n)
 
     def ensemble(self):
         """(offset_hz, scale) pairs of the broadband grid."""
@@ -220,12 +264,52 @@ def spline_basis(N, M):
     return np.nan_to_num(B)
 
 
+def control_noise(N, dt, std, correlation_us, rng):
+    """Random controls (2N: x then y) with standard deviation ``std``: white, or smooth with a Gaussian
+    correlation time ``correlation_us`` (then the starts differ in their large-scale shape, not by spikes)."""
+    z = rng.normal(0.0, 1.0, (2, N))
+    sigma = correlation_us * 1e-6 / dt
+    if sigma >= 0.5 and N > 1:
+        from scipy.ndimage import gaussian_filter1d
+        z = gaussian_filter1d(z, sigma, axis=1, mode="reflect")
+        z /= np.sqrt(np.mean(z * z, axis=1, keepdims=True)) + 1e-300
+    return std * np.r_[z[0], z[1]]
+
+
+def has_soft(cfg):
+    return (cfg.regularization == "stay_close" and cfg.regularization_weight > 0) or cfg.smooth_weight > 0
+
+
+def stage_plan(cfg, N):
+    """Stages (controls, spline points, soft-term factor, kind): "coarse" spline levels (soft terms at full
+    weight), then the chosen controls with the soft terms lowered stage by stage (SOFT_SCHEDULE, kind "main"),
+    then "reweight" stages (Lawson: before each, the weights of the points grow with their errors)."""
+    soft = SOFT_SCHEDULE if has_soft(cfg) else (1.0,)
+    final_m = int(cfg.n_spline) if cfg.controls == "spline" else N
+    levels = sorted({int(m) for m in cfg.coarse_levels if 4 <= int(m) < final_m and int(m) <= N})
+    plan = [("spline", m, soft[0], "coarse") for m in levels] + [(cfg.controls, int(cfg.n_spline), f, "main") for f in soft]
+    if cfg.n_points() > 1:
+        plan += [(cfg.controls, int(cfg.n_spline), soft[-1], "reweight")] * int(cfg.reweight_rounds)
+    return plan
+
+
+def lawson_update(weights, errors, power=1.0):
+    """Lawson step towards the minimax solution: w <- w (e / mean e)^power, normalized to mean 1 and kept
+    within [1e-4, 1e4]."""
+    w = np.asarray(weights, float)
+    e = np.maximum(np.asarray(errors, float), 1e-300)
+    w = w * (e / np.mean(e)) ** power
+    w = np.clip(w / np.mean(w), 1e-4, 1e4)
+    return w / np.mean(w)
+
+
 # ----------------------------------------------------------------- problem ---
 
-INFO_KEYS = ("mean infidelity", "max amplitude [%]", "max amplitude rate [%/µs]", "max phase rate [kHz]", "roughness")
+INFO_KEYS = ("mean infidelity", "max amplitude [%]", "max amplitude rate [%/µs]", "max phase rate [kHz]", "roughness",
+             "point error spread")
 SOFT_SCHEDULE = (1.0, 0.1, 0.01, 1e-3, 1e-4, 0.0)      # weights of the soft terms in successive stages
 LIMIT_EXCESS_TOL = 1e-3
-SOFT_STAGE_TOL = 1e-6                                   # xtol / ftol / gtol of the soft stages                                 # rate limits count as kept below this relative excess
+SOFT_STAGE_TOL = 1e-6                                   # xtol / ftol / gtol of the soft and coarse stages
 
 
 class GrapeProblem:
@@ -245,17 +329,18 @@ class GrapeProblem:
         self.m0, self.mt = _unit(config.m0), _unit(config.m_target)
         self.Rt = rotation_from_axis_angle(config.target_axis, config.target_angle_deg) if config.gate == "UR" else None
         self.soft_scale = 1.0
+        self.point_weights = None            # Lawson weights of the points (offsets / grid points), None = all 1
+        self.point_errors = None             # unweighted goal residual of every point (set by goals)
         D = sparse.diags([-np.ones(self.N - 1), np.ones(self.N - 1)], [0, 1], shape=(self.N - 1, self.N))
         self.D2 = sparse.block_diag([D, D], format="csr")             # first differences of u_x and u_y
         w0 = self.unsquash(self.x0)
         if config.controls == "spline":
             B = spline_basis(self.N, int(config.n_spline))
             self.basis = sparse.block_diag([sparse.csr_matrix(B), sparse.csr_matrix(B)], format="csr")
-            c = np.linalg.lstsq(B, np.column_stack([w0[:self.N], w0[self.N:]]), rcond=None)[0]
-            self.p0 = np.r_[c[:, 0], c[:, 1]]
+            self._pinv = np.linalg.pinv(B)
         else:
             self.basis = None
-            self.p0 = w0
+        self.p0 = self.params(w0)
 
     def controls(self, x):
         return x[:self.N], x[self.N:]
@@ -266,10 +351,20 @@ class GrapeProblem:
         return PulseSequence(np.minimum(amp, 1.0) * 100.0, np.degrees(np.unwrap(np.arctan2(uy, ux))), self.dt, self.umax)
 
     def has_soft_terms(self):
-        c = self.cfg
-        return (c.regularization == "stay_close" and c.regularization_weight > 0) or c.smooth_weight > 0
+        return has_soft(self.cfg)
 
     # ------------------------------------------------- parameters -> controls ---
+    def wvec(self, p):
+        """Unsquashed controls w (2N) of the parameters p."""
+        return p if self.basis is None else self.basis @ p
+
+    def params(self, w):
+        """Parameters of the unsquashed controls w (least-squares fit for spline controls)."""
+        w = np.asarray(w, dtype=np.float64)
+        if self.basis is None:
+            return w.copy()
+        return np.r_[self._pinv @ w[:self.N], self._pinv @ w[self.N:]]
+
     def to_controls(self, p):
         """Controls u(p) and the sparse Jacobian du/dp."""
         w = p if self.basis is None else self.basis @ p
@@ -310,9 +405,11 @@ class GrapeProblem:
         ux, uy = self.controls(x)
         cfg, st = self.cfg, self.st
         rows, jac, summ = [], [], {}
+        marks = []                                   # index in rows where each point starts
         if cfg.mode == "local":
             K = max(cfg.orders) if cfg.orders else 0
             for off in cfg.offsets_hz:
+                marks.append(len(rows))
                 X, dX = propagator_and_gradient(ux, uy, self.dt, self.umax, off, 1.0, max(K, 1))
                 if cfg.orders:
                     mg = magnus_with_gradient(X, dX)
@@ -347,6 +444,7 @@ class GrapeProblem:
             w = st.weight("gate") / math.sqrt(len(ens))
             inf = []
             for off, sc in ens:
+                marks.append(len(rows))
                 X, dX = propagator_and_gradient(ux, uy, self.dt, self.umax, off, sc, 0)
                 R, dR = rotation_with_gradient(X[0], dX[:, 0])
                 r, j = self._gate_rows(R, dR, w)
@@ -357,8 +455,18 @@ class GrapeProblem:
                     inf.append(1 - (1 + float(R @ self.m0 @ self.mt)) / 2)
             summ["mean infidelity"] = float(np.mean(inf))
             summ["max infidelity"] = float(np.max(inf))
+        sizes = np.cumsum([0] + [len(v) for v in rows])
+        bounds = [(sizes[a], sizes[b]) for a, b in zip(marks, marks[1:] + [len(rows)])]
         r = np.concatenate(rows) if rows else np.zeros(0)
         Jm = np.vstack(jac) if jac else np.zeros((0, 2 * self.N))
+        self.point_errors = np.array([np.linalg.norm(r[a:b]) for a, b in bounds])
+        if self.point_weights is not None and len(self.point_weights) == len(bounds):
+            scale = np.ones(len(r))
+            for (a, b), wt in zip(bounds, self.point_weights):
+                scale[a:b] = math.sqrt(wt)
+            r, Jm = r * scale, Jm * scale[:, None]
+        if len(bounds) > 1:
+            summ["point error spread"] = float(np.max(self.point_errors) / max(np.mean(self.point_errors), 1e-300))
         return r, Jm, summ
 
     def reached(self, summ):
@@ -454,7 +562,8 @@ class GrapeProblem:
         re, Je, info = self.extra(x)
         summ.update(info)
         summ["max amplitude [%]"] = float(100 * np.max(np.hypot(*self.controls(x))))
-        return r, Jg, re, Je, summ, float(np.linalg.norm(r))
+        goal = float(np.linalg.norm(self.point_errors)) if self.point_errors is not None else float(np.linalg.norm(r))
+        return r, Jg, re, Je, summ, goal                     # goal residual without the Lawson weights
 
     def evaluate(self, x):
         """All residuals, their sparse Jacobian (with respect to the controls x), summary and goal residual."""
@@ -526,48 +635,128 @@ def levenberg_marquardt(fun, p, max_nfev, xtol, ftol, gtol):
     return p, "evaluation limit reached"
 
 
+def _start_parameters(prob, cfg):
+    """Parameters of the first stage of a new candidate: the start pulse (tiny symmetry-breaking noise, or the
+    spread for starts 2, 3, ...: white or smooth) or, for start_kind "random", a random pulse."""
+    rng = np.random.default_rng(cfg.seed)
+    if cfg.start_kind == "random":
+        return prob.params(control_noise(prob.N, prob.dt, 1.0, cfg.noise_correlation_us, rng))
+    if cfg.start_noise <= 0:
+        return prob.p0.copy()
+    if cfg.noise_correlation_us > 0:
+        w = prob.unsquash(prob.x0) + control_noise(prob.N, prob.dt, cfg.start_noise, cfg.noise_correlation_us, rng)
+        return prob.params(w)
+    # an exactly symmetric start (e.g. a constant-phase pulse) can keep the solver in a symmetric subspace
+    return prob.p0 + rng.normal(0.0, cfg.start_noise, prob.p0.shape)
+
+
+STOP_MESSAGES = {"solved": "all goals reached", "limit": "evaluation limit reached", "time": "time limit reached",
+                 "user": "stopped by the user", "paused": "evaluation budget of this round used"}
+
+
 def optimize(ps: PulseSequence, config: GrapeConfig, settings: SolverSettings = None, callback=None,
-             snapshot=None, snapshot_interval_s=1.0, start_index=0):
+             snapshot=None, snapshot_interval_s=1.0, start_index=0, state=None, budget=None):
     """Run the optimization from the start pulse ``ps`` (start ``start_index`` of a multi-start: other
-    seed and, for index > 0, a larger start perturbation). ``callback(nfev, goal_residual)`` returning True
+    seed and, for index > 0, the spread or a random start). ``callback(nfev, goal_residual)`` returning True
     stops it; ``snapshot(pulse, goal_residual)`` receives the best pulse every ``snapshot_interval_s``.
-    Solver: Levenberg-Marquardt (lm_step) on the parameters. With soft terms (stay close, smoothness) it
-    runs in stages with decreasing soft weights (SOFT_SCHEDULE), each started from the previous result,
-    until the goals are reached. Returns (result pulse, info dict)."""
+
+    Solver: Levenberg-Marquardt (lm_step) on the parameters, in the stages of stage_plan: coarse spline
+    levels, then the controls with the soft terms (stay close, smoothness) lowered stage by stage until the
+    goals are reached. Non-final stages get a share of the budget and relaxed tolerances.
+
+    Resumable: ``budget`` limits the evaluations of this call (the run then pauses, stop_reason "paused");
+    ``state`` (info["state"] of a paused run, or {"stage", "w"} for a new candidate given by its unsquashed
+    controls w) continues it. settings.max_nfev is the total of all calls. Returns (pulse, info dict)."""
     st = settings or SolverSettings()
     cfg = config.variant(start_index)
-    prob = GrapeProblem(ps, cfg, st)
+    cfg.check()
+    plan = stage_plan(cfg, ps.N)
+    problems = {}
+
+    def problem(s):
+        ctrl, m = plan[s][:2]
+        key = (ctrl, m if ctrl == "spline" else 0)
+        if key not in problems:
+            problems[key] = GrapeProblem(ps, cfg.replace(controls=ctrl, n_spline=m), st)
+        return problems[key]
+
     t0 = time.time()
     last_snap = [t0]
-    p = prob.p0.copy()
-    if cfg.start_noise > 0:
-        # an exactly symmetric start (e.g. a constant-phase pulse) can keep the solver in a symmetric subspace
-        p = p + np.random.default_rng(cfg.seed).normal(0.0, cfg.start_noise, p.shape)
-    count = {"nfev": 0, "history": []}
+    weights = None
+    minimax = {"worst": np.inf, "w": None, "weights": None}
+    if state is None:
+        s, used, nfev0 = 0, 0, 0
+        p = _start_parameters(problem(0), cfg)
+    else:
+        s, used, nfev0 = min(int(state.get("stage", 0)), len(plan) - 1), int(state.get("stage_nfev", 0)), int(state.get("nfev", 0))
+        p = (np.asarray(state["p"], float) if state.get("p") is not None
+             else problem(s).params(np.asarray(state["w"], float)))
+        if state.get("weights") is not None:
+            weights = np.asarray(state["weights"], float)
+    count = {"nfev": nfev0, "history": []}
+    limit = st.max_nfev if budget is None else min(st.max_nfev, nfev0 + max(1, int(budget)))
     tols = [t if t and t > 0 else 0.0 for t in (st.xtol, st.ftol, st.gtol)]
-    schedule = SOFT_SCHEDULE if prob.has_soft_terms() else (1.0,)
-    reason, message = "converged", ""
-    for factor in schedule:
-        prob.soft_scale = factor
-        final = factor == schedule[-1]
+    n_pre = sum(1 for stage in plan if stage[3] != "reweight") - 1          # stages before the last main stage
+    share = max(10, st.max_nfev // (2 * max(n_pre, 1)))
+    reason, message, cost = "converged", "", float("nan")
+
+    def advance():
+        nonlocal s, p, used, weights
+        w = problem(s).wvec(p)
+        s, used = s + 1, 0
+        p = problem(s).params(w)
+        if plan[s][3] == "reweight":                     # Lawson: weights grow with the errors of the points
+            nxt = problem(s)
+            nxt.point_weights = weights
+            nxt.goals(nxt.to_controls(p)[0])
+            worst = float(np.max(nxt.point_errors))
+            if worst < minimax["worst"]:                  # keep the round with the smallest worst-point error
+                minimax.update(worst=worst, w=nxt.wvec(p).copy(), weights=weights)
+            weights = lawson_update(np.ones(len(nxt.point_errors)) if weights is None else weights,
+                                    nxt.point_errors, cfg.reweight_power)
+
+    while True:
+        prob = problem(s)
+        prob.soft_scale = plan[s][2]
+        prob.point_weights = weights
+        final = s == len(plan) - 1
+        kind = plan[s][3]
+        last_main = kind == "main" and not final and plan[s + 1][3] == "reweight"
+        if final or last_main:          # the main stage runs as without reweighting; the rounds share the rest
+            stage_left = st.max_nfev - count["nfev"]
+        elif kind == "reweight":
+            stage_left = max(10, (st.max_nfev - count["nfev"] + used) // (len(plan) - s)) - used
+        else:
+            stage_left = share - used
+        call_left = limit - count["nfev"]
+        if count["nfev"] >= st.max_nfev:
+            reason = "limit"
+            break
+        if stage_left <= 0:
+            if final:
+                reason = "limit"
+                break
+            advance()
+            continue
+        if call_left <= 0:
+            reason = "paused"
+            break
         best = {"p": p.copy(), "cost": np.inf, "goal": np.inf, "summ": None}
 
         def fun(q):
-            if count["nfev"] >= st.max_nfev:
-                raise _Stop("limit")
             if st.time_limit_s > 0 and time.time() - t0 > st.time_limit_s:
                 raise _Stop("time")
             u, Mp = prob.to_controls(q)
             rg, Jg, rs, Js, summ, goal = prob.evaluate_blocks(u)
             G = np.asarray(Jg @ Mp) if sparse.issparse(Mp) else Jg @ Mp
             S = sparse.csr_matrix(Js @ Mp) if Js.shape[0] else None
-            cost = float(np.sqrt(rg @ rg + rs @ rs))
+            c = float(np.sqrt(rg @ rg + rs @ rs))
             count["nfev"] += 1
-            if cost < best["cost"]:
-                best.update(p=np.array(q), cost=cost, goal=goal, summ=summ)
+            if c < best["cost"]:
+                best.update(p=np.array(q), cost=c, goal=goal, summ=summ)
             count["history"].append(best["goal"])
             if final and st.stop_when_solved and prob.reached(summ):
-                best.update(p=np.array(q), cost=cost, goal=goal, summ=summ)
+                best.update(p=np.array(q), cost=c, goal=goal, summ=summ)
                 raise _Stop("solved")
             if callback is not None and callback(count["nfev"], best["goal"]):
                 raise _Stop("user")
@@ -576,86 +765,391 @@ def optimize(ps: PulseSequence, config: GrapeConfig, settings: SolverSettings = 
                 snapshot(prob.pulse(prob.to_controls(best["p"])[0]), best["goal"])
             return rg, G, rs, (S if S is not None else sparse.csr_matrix((0, len(q))))
 
-        remaining = st.max_nfev - count["nfev"]
-        if final:
-            stage_nfev, stage_tols = remaining, tols
-        else:                     # soft stages: a share of the budget, end when the progress stalls
-            stage_nfev = max(10, st.max_nfev // (2 * (len(schedule) - 1)))
-            stage_tols = [max(t, SOFT_STAGE_TOL) for t in tols]
+        stage_tols = tols if final or last_main or kind == "reweight" else [max(t, SOFT_STAGE_TOL) for t in tols]
+        n_before = count["nfev"]
+        stopped = None
         try:
-            _, message = levenberg_marquardt(fun, p, min(stage_nfev, remaining), *stage_tols)
-            reason = "limit" if message == "evaluation limit reached" and (final or count["nfev"] >= st.max_nfev) else "converged"
-        except _Stop as s:
-            reason = s.reason
-            message = {"solved": "all goals reached", "limit": "evaluation limit reached",
-                       "time": "time limit reached", "user": "stopped by the user"}[s.reason]
-        p = best["p"]
-        if reason != "converged":
+            _, message = levenberg_marquardt(fun, p, min(stage_left, call_left), *stage_tols)
+        except _Stop as e:
+            stopped = e.reason
+        used += count["nfev"] - n_before
+        if best["summ"] is not None:
+            p, cost = best["p"], best["cost"]
+        if stopped is not None:
+            reason = stopped
             break
         if best["summ"] is not None and prob.reached(best["summ"]) and (st.stop_when_solved or final):
-            reason, message = "solved", "all goals reached"
+            reason = "solved"
             break
+        converged = message != "evaluation limit reached"
+        stage_done = converged or count["nfev"] - n_before >= stage_left        # else: the call budget ran out
+        if not stage_done:
+            reason = "paused"
+            break
+        if final:
+            reason = "converged" if converged else "limit"
+            break
+        advance()
+    message = STOP_MESSAGES.get(reason, message)
+    prob = problem(s)
+    if minimax["w"] is not None and reason in ("converged", "limit") and plan[s][3] == "reweight":
+        prob.point_weights = None
+        prob.goals(prob.to_controls(p)[0])
+        if float(np.max(prob.point_errors)) > minimax["worst"]:
+            p, weights = prob.params(minimax["w"]), minimax["weights"]
     u = prob.to_controls(p)[0]
-    prob.soft_scale = schedule[-1]
+    prob.soft_scale, prob.point_weights = plan[-1][2], None
     _, _, summ, goal = prob.evaluate(u)
-    start = prob.evaluate(prob.to_controls(prob.p0)[0])[2]
+    errors = prob.point_errors
+    start = prob.evaluate(prob.x0)[2]
+    prob.soft_scale = plan[s][2]
     return prob.pulse(u), {"stop_reason": reason, "message": message, "reached": prob.reached(summ),
                            "values": summ, "start_summary": start, "nfev": count["nfev"], "goal_residual": goal,
-                           "elapsed_s": time.time() - t0, "history": count["history"], "start_index": start_index,
-                           "cancelled": reason == "user"}
+                           "cost": cost if np.isfinite(cost) else goal, "elapsed_s": time.time() - t0,
+                           "history": count["history"], "start_index": start_index, "cancelled": reason == "user",
+                           "finished": reason != "paused", "stage": s, "n_stages": len(plan),
+                           "state": {"stage": s, "p": p.tolist(), "stage_nfev": used, "nfev": count["nfev"],
+                                     "weights": None if weights is None else weights.tolist()},
+                           "point_weights": None if weights is None else weights.tolist(),
+                           "point_errors": None if errors is None else errors.tolist(),
+                           "w": prob.wvec(p).tolist()}
 
 
 def selection_key(config: GrapeConfig, info):
-    """Order of multi-start results: reached first; among those the smoothest (if smoothing is on), else
-    the lowest goal residual."""
+    """Order of results: reached first; among those the smoothest (if smoothing is on), else the lowest goal
+    residual."""
     second = info["values"].get("roughness", 0.0) if config.smooth_weight > 0 and info["reached"] else info["goal_residual"]
     return (not info["reached"], second)
 
 
-def _run_start(args):
-    amp, phase, dt, umax, cfg, st, i = args
-    ps, info = optimize(PulseSequence(np.asarray(amp), np.asarray(phase), dt, umax), GrapeConfig.from_dict(cfg),
-                        SolverSettings.from_dict(st), start_index=i)
-    return ps.amplitude, ps.phase, info
+# ------------------------------------------------------------- exploration ---
+
+EXPLORATION_PRESETS = {
+    # n_starts etc.; "correlation" is a fraction of the pulse duration (-> noise_correlation_us)
+    "exploit": dict(n_starts=1, multistart_noise=0.5, start_pool="perturb", correlation=0.0, screen_rounds=0,
+                    screen_nfev=40, keep_fraction=0.5, crossover_rate=0.0, n_kicks=0, kick_size=0.3,
+                    kick_temperature=0.0, coarse_levels=[]),
+    "balanced": dict(n_starts=8, multistart_noise=0.5, start_pool="perturb", correlation=0.05, screen_rounds=2,
+                     screen_nfev=30, keep_fraction=0.5, crossover_rate=0.0, n_kicks=4, kick_size=0.3,
+                     kick_temperature=0.0, coarse_levels=[]),
+    "explore": dict(n_starts=24, multistart_noise=1.0, start_pool="mix", correlation=0.1, screen_rounds=3,
+                    screen_nfev=25, keep_fraction=0.5, crossover_rate=0.0, n_kicks=8, kick_size=0.5,
+                    kick_temperature=0.3, coarse_levels=[8, 16]),
+}
 
 
-def optimize_multistart(ps: PulseSequence, config: GrapeConfig, settings: SolverSettings = None, processes=1):
-    """All ``config.n_starts`` starts (in parallel processes if ``processes`` > 1); returns the best pulse
-    (selection_key), its info and the infos of all starts."""
-    st = settings or SolverSettings()
-    jobs = [(ps.amplitude, ps.phase, ps.dt, ps.umax, config.to_dict(), st.to_dict(), i) for i in range(int(config.n_starts))]
-    if processes > 1 and len(jobs) > 1:
-        import multiprocessing as mp
-        with mp.get_context("spawn").Pool(min(processes, len(jobs))) as pool:
-            results = pool.map(_run_start, jobs)
-    else:
-        results = [_run_start(j) for j in jobs]
-    amp, phase, info = min(results, key=lambda r: selection_key(config, r[2]))
-    return PulseSequence(amp, phase, ps.dt, ps.umax), info, [r[2] for r in results]
+def exploration_preset(name, duration_s):
+    """GrapeConfig fields of an exploration preset for a pulse of the given duration."""
+    d = dict(EXPLORATION_PRESETS[name])
+    d["noise_correlation_us"] = round(d.pop("correlation") * duration_s * 1e6, 3)
+    return d
 
 
-def run_grape_job(job, queue, stop_event):
-    """Process entry point for one start: job = {"pulse": [amp, phase, dt, umax], "config", "settings",
-    "start_index"}. Puts ("progress", i, nfev, goal_residual), ("snapshot", i, amp, phase, goal_residual),
-    ("done", i, amp, phase, info) or ("error", i, msg)."""
-    i = int(job.get("start_index", 0))
+class Search:
+    """Exploration around GRAPE with a population of candidates, independent of where the work runs.
+
+    Round r: every live candidate is refined (resumably) up to screen_nfev / keep_fraction^r evaluations;
+    then the best keep_fraction survive (reached goals first, then the lowest cost), and a fraction of the
+    dropped places is refilled with crossover children of two survivors. After screen_rounds rounds the
+    survivors run to the end (settings.max_nfev per candidate). Then n_kicks kicks of the best result (in
+    batches of ``parallel``): smooth perturbation of size kick_size, full re-optimization, accepted if better
+    (Metropolis with kick_temperature on log10 of the goal residual, or of the roughness once reached).
+
+    Drive it with tasks() (tasks ready now; run each with run_task, anywhere) and submit(result) for every
+    finished one; ``done`` tells when it is over, best() gives the result."""
+
+    def __init__(self, ps: PulseSequence, config: GrapeConfig, settings: SolverSettings = None, parallel=1):
+        config.check()
+        self.ps, self.cfg, self.st = ps, config, settings or SolverSettings()
+        self.parallel = max(1, int(parallel))
+        self.rng = np.random.default_rng(int(config.seed) + 104729)
+        self.plan = stage_plan(config, ps.N)
+        self.n_coarse = sum(1 for stage in self.plan if stage[3] == "coarse")
+        self._pulse = [np.minimum(ps.amplitude, 100.0).tolist(), np.asarray(ps.phase, float).tolist(), ps.dt, ps.umax]
+        self.cands = {}
+        self._ready, self._out = [], {}
+        self._tid = 0
+        self.round = 0
+        self.phase = "rounds"
+        self.kicks_left = int(config.n_kicks)
+        self.kicks_accepted = 0
+        self.kicks_done = 0
+        self.current = None
+        self.stopped = False
+        self.log = []
+        self.errors = []
+        for i in range(int(config.n_starts)):
+            self._add("start", start_index=i)
+        self._issue_round()
+
+    # ------------------------------------------------------------ public ---
+    @property
+    def done(self):
+        return self.phase == "done"
+
+    def tasks(self):
+        out, self._ready = self._ready, []
+        return out
+
+    @property
+    def running(self):
+        return len(self._out)
+
+    def submit(self, result):
+        cid = self._out.pop(result["tid"], None)
+        if cid is None:
+            return
+        c = self.cands[cid]
+        if "error" in result:
+            c["alive"], c["finished"] = False, True
+            self.errors.append(result["error"])
+        else:
+            info = result["info"]
+            c.update(info=info, amp=result["amp"], phase=result["phase"], state=info["state"], finished=info["finished"])
+            if info.get("cancelled"):
+                self.stopped = True
+        if not self._out and not self._ready:
+            self._advance()
+
+    def stop(self):
+        """No new tasks; the search ends when the running ones have returned."""
+        self.stopped = True
+        for t in self._ready:
+            self._out.pop(t["tid"], None)
+        self._ready = []
+        if not self._out:
+            self.phase = "done"
+
+    def best(self):
+        """(candidate id, pulse, info) of the best result; info["search"] summarizes the search."""
+        have = [cid for cid, c in self.cands.items() if c["info"] is not None]
+        if not have:
+            raise RuntimeError(self.errors[0] if self.errors else "no result")
+        cid = min(have, key=lambda k: selection_key(self.cfg, self.cands[k]["info"]))
+        c = self.cands[cid]
+        info = dict(c["info"])
+        info["search"] = {"best": cid, "kind": c["kind"], "candidates": len(self.cands), "log": list(self.log),
+                          "reached": sum(1 for k in have if self.cands[k]["info"]["reached"]),
+                          "evaluations": sum(self.cands[k]["info"]["nfev"] for k in have),
+                          "kicks": self.kicks_done, "kicks_accepted": self.kicks_accepted}
+        return cid, PulseSequence(np.asarray(c["amp"]), np.asarray(c["phase"]), self.ps.dt, self.ps.umax), info
+
+    def infos(self):
+        return [c["info"] for c in self.cands.values() if c["info"] is not None]
+
+    # ----------------------------------------------------------- internal ---
+    def _add(self, kind, start_index=0, state=None, parents=()):
+        cid = len(self.cands)
+        self.cands[cid] = {"kind": kind, "start_index": start_index, "state": state, "parents": tuple(parents),
+                           "info": None, "amp": None, "phase": None, "alive": True, "finished": False}
+        return cid
+
+    def _task(self, cid, budget):
+        c = self.cands[cid]
+        task = {"tid": self._tid, "cid": cid, "pulse": self._pulse, "config": self.cfg.to_dict(),
+                "settings": self.st.to_dict(), "start_index": c["start_index"], "state": c["state"], "budget": budget}
+        self._out[self._tid] = cid
+        self._ready.append(task)
+        self._tid += 1
+
+    def _round_budget(self):
+        if self.round >= int(self.cfg.screen_rounds):
+            return None
+        return int(math.ceil(self.cfg.screen_nfev / self.cfg.keep_fraction ** self.round))
+
+    def _issue_round(self):
+        total = self._round_budget()
+        for cid, c in self.cands.items():
+            if c["alive"] and not c["finished"]:
+                nfev = c["state"]["nfev"] if c["state"] and "nfev" in c["state"] else 0
+                self._task(cid, None if total is None else max(1, total - nfev))
+
+    def _screen_key(self, cid):
+        info = self.cands[cid]["info"]
+        if info["reached"]:
+            return (0, info["values"].get("roughness", 0.0) if self.cfg.smooth_weight > 0 else info["goal_residual"])
+        return (1, info["cost"])
+
+    def _mask(self, N):
+        if self.rng.random() < 0.5:                                    # blend of the two parents
+            return np.full(N, self.rng.uniform(0.25, 0.75))
+        t0 = self.rng.uniform(0.2, 0.8) * N                            # first part of one, rest of the other
+        width = max(1.0, 0.05 * N)
+        return 0.5 * (1 + np.tanh((np.arange(N) + 0.5 - t0) / width))
+
+    def _crossover(self, a, b):
+        ca, cb = self.cands[a], self.cands[b]
+        m = self._mask(self.ps.N)
+        m2 = np.r_[m, m]
+        w = m2 * np.asarray(ca["info"]["w"]) + (1 - m2) * np.asarray(cb["info"]["w"])
+        stage = min(ca["state"]["stage"], cb["state"]["stage"])
+        return self._add("child", state={"stage": stage, "w": w.tolist(), "stage_nfev": 0, "nfev": 0}, parents=(a, b))
+
+    def _kick_score(self, info):
+        if info["reached"]:
+            return (0, math.log10(max(info["values"].get("roughness", 0.0), 1e-300)) if self.cfg.smooth_weight > 0 else 0.0)
+        return (1, math.log10(max(info["goal_residual"], 1e-300)))
+
+    def _accept(self, new, cur):
+        a, b = self._kick_score(new), self._kick_score(cur)
+        if a[0] != b[0]:
+            return a[0] < b[0]
+        d = a[1] - b[1]
+        if d < 0:
+            return True
+        T = self.cfg.kick_temperature
+        return T > 0 and self.rng.random() < math.exp(-d / T)
+
+    def _worth_kicking(self, info):
+        return not (info["reached"] and self.cfg.smooth_weight == 0)
+
+    def _advance(self):
+        while not self._ready and not self._out and self.phase != "done":
+            if self.stopped:
+                self.phase = "done"
+                return
+            if self.phase == "rounds":
+                self._next_round()
+            else:
+                self._next_kicks()
+
+    def _next_round(self):
+        cfg = self.cfg
+        alive = [cid for cid, c in self.cands.items() if c["alive"] and c["info"] is not None]
+        if not alive:
+            self.phase = "done"
+            return
+        ranked = sorted(alive, key=self._screen_key)
+        lead = self.cands[ranked[0]]["info"]
+        if lead["reached"] and cfg.smooth_weight == 0 and self.st.stop_when_solved:
+            self.log.append(f"round {self.round + 1}: goals reached by {sum(self.cands[k]['info']['reached'] for k in alive)} "
+                            f"of {len(alive)} candidates")
+            self._enter_kicks(ranked[0])
+            return
+        if self.round < int(cfg.screen_rounds) and len(alive) > 1:
+            k = max(1, int(math.ceil(cfg.keep_fraction * len(alive))))
+            for cid in ranked[k:]:
+                self.cands[cid]["alive"] = False
+            survivors = ranked[:k]
+            n_child = int(round(cfg.crossover_rate * (len(alive) - k))) if k >= 2 else 0
+            for _ in range(n_child):
+                i, j = self.rng.choice(len(survivors), 2, replace=False)
+                self._crossover(survivors[int(i)], survivors[int(j)])
+            self.log.append(f"round {self.round + 1}: {len(alive)} candidates, {self._round_budget()} evaluations each "
+                            f"→ kept {k}" + (f" + {n_child} crossover children" if n_child else ""))
+            self.round += 1
+            if k == 1 and not n_child:
+                self.round = int(cfg.screen_rounds)
+            self._issue_round()
+            return
+        if self.round < int(cfg.screen_rounds) or any(not self.cands[c]["finished"] for c in alive):
+            self.round = int(cfg.screen_rounds)           # final round: the rest of the budget
+            self._issue_round()
+            if self._ready:
+                return
+        n_reached = sum(1 for k in alive if self.cands[k]["info"]["reached"])
+        self.log.append(f"final: {len(alive)} candidate{'s' if len(alive) > 1 else ''}, {n_reached} reached the goals")
+        self._enter_kicks(ranked[0] if alive else None)
+
+    def _enter_kicks(self, cid):
+        self.phase = "kicks"
+        have = [k for k, c in self.cands.items() if c["info"] is not None]
+        self.current = min(have, key=lambda k: selection_key(self.cfg, self.cands[k]["info"])) if have else cid
+        self._batch = []
+        if self.kicks_left > 0 and not self._worth_kicking(self.cands[self.current]["info"]):
+            self.log.append("kicks skipped: the goals are already reached")
+            self.kicks_left = 0
+        self._issue_kicks()
+
+    def _issue_kicks(self):
+        if self.kicks_left <= 0 or self.current is None:
+            self.phase = "done"
+            return
+        cur = self.cands[self.current]
+        w0 = np.asarray(cur["info"]["w"])
+        self._batch = []
+        for _ in range(min(self.kicks_left, self.parallel)):
+            w = w0 + control_noise(self.ps.N, self.ps.dt, self.cfg.kick_size, self.cfg.noise_correlation_us, self.rng)
+            cid = self._add("kick", state={"stage": self.n_coarse, "w": w.tolist(), "stage_nfev": 0, "nfev": 0},
+                            parents=(self.current,))
+            self._batch.append(cid)
+            self._task(cid, None)
+        self.kicks_left -= len(self._batch)
+        self.kicks_done += len(self._batch)
+
+    def _next_kicks(self):
+        accepted = 0
+        for cid in self._batch:
+            info = self.cands[cid]["info"]
+            if info is not None and self._accept(info, self.cands[self.current]["info"]):
+                self.current = cid
+                accepted += 1
+        self.kicks_accepted += accepted
+        done = self.kicks_done
+        self.log.append(f"kicks {done - len(self._batch) + 1}–{done}: {accepted} accepted")
+        if not self._worth_kicking(self.cands[self.current]["info"]):
+            self.kicks_left = 0
+        self._issue_kicks()
+
+
+def run_task(task, queue=None, stop_event=None):
+    """Run one Search task (in any process). With a queue it reports ("progress", cid, nfev, goal_residual)
+    and ("snapshot", cid, amp, phase, goal_residual); a set stop_event stops it. Returns the result dict
+    for Search.submit."""
+    tid, cid = task["tid"], task["cid"]
     try:
-        amp, phase, dt, umax = job["pulse"]
+        amp, phase, dt, umax = task["pulse"]
         ps = PulseSequence(np.asarray(amp), np.asarray(phase), dt, umax)
-        last = [0]
+        last = [-10]
 
         def callback(nfev, cost):
-            if nfev - last[0] >= 5 or nfev == 1:
+            if queue is not None and nfev - last[0] >= 5:
                 last[0] = nfev
-                queue.put(("progress", i, nfev, cost))
-            return stop_event.is_set()
+                queue.put(("progress", cid, nfev, cost))
+            return stop_event is not None and stop_event.is_set()
 
         def snapshot(p, cost):
-            queue.put(("snapshot", i, p.amplitude.tolist(), p.phase.tolist(), cost))
+            queue.put(("snapshot", cid, p.amplitude.tolist(), p.phase.tolist(), cost))
 
-        result, info = optimize(ps, GrapeConfig.from_dict(job["config"]), SolverSettings.from_dict(job.get("settings")),
-                                callback, snapshot, start_index=i)
+        result, info = optimize(ps, GrapeConfig.from_dict(task["config"]), SolverSettings.from_dict(task.get("settings")),
+                                callback, snapshot if queue is not None else None, start_index=task["start_index"],
+                                state=task.get("state"), budget=task.get("budget"))
         info["history"] = info["history"][-5000:]
-        queue.put(("done", i, result.amplitude.tolist(), result.phase.tolist(), info))
+        return {"tid": tid, "cid": cid, "amp": result.amplitude.tolist(), "phase": result.phase.tolist(), "info": info}
     except Exception as e:
-        queue.put(("error", i, f"{type(e).__name__}: {e}"))
+        return {"tid": tid, "cid": cid, "error": f"{type(e).__name__}: {e}"}
+
+
+def grape_worker(tasks, results, stop_event):
+    """Worker process: runs tasks from the ``tasks`` queue until it gets None; puts ("done", result) (and the
+    progress messages of run_task) into ``results``."""
+    while True:
+        task = tasks.get()
+        if task is None:
+            return
+        results.put(("done", run_task(task, results, stop_event)))
+
+
+def search(ps: PulseSequence, config: GrapeConfig, settings: SolverSettings = None, processes=1):
+    """Run the whole Search (tasks in parallel processes if ``processes`` > 1). Returns (best pulse, its info,
+    infos of all candidates)."""
+    s = Search(ps, config, settings, parallel=processes)
+    pool = None
+    try:
+        if processes > 1:
+            import multiprocessing as mp
+            pool = mp.get_context("spawn").Pool(processes)
+        while not s.done:
+            tasks = s.tasks()
+            results = pool.map(run_task, tasks) if pool is not None and len(tasks) > 1 else [run_task(t) for t in tasks]
+            for r in results:
+                s.submit(r)
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
+    _, pulse, info = s.best()
+    return pulse, info, s.infos()
+
+
+optimize_multistart = search

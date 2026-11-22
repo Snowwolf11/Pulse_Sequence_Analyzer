@@ -596,6 +596,10 @@ def test_grape_tab_inputs_start_sources_and_stop():
     cfg = tab.config()
     assert cfg.mode == "broadband" and cfg.gate == "PP" and len(cfg.ensemble()) == 33
     assert cfg.regularization == "stay_close" and cfg.regularization_weight == 0.01
+    tab.reweight_spin.setValue(4); tab.reweight_power_spin.setValue(0.8)
+    cfg = tab.config()
+    assert cfg.reweight_rounds == 4 and cfg.reweight_power == 0.8 and cfg.n_points() == 33
+    tab.reweight_spin.setValue(0)
     # long random start: Stop returns the best pulse so far, the GUI stays usable
     tab.source_box.setCurrentText("random"); tab.dur_spin.setValue(400.0); tab.load_button.click(); process(20)
     w.solver_settings.stop_when_solved = False
@@ -630,11 +634,46 @@ def test_grape_tab_multistart_spline_and_limits():
     assert tab.solving and not tab.spline_spin.isEnabled()
     wait_until(lambda: not tab.solving, 180)
     text = tab.status.text()
-    assert text.startswith("all goals reached") and "best of 3 starts" in text, text
+    assert text.startswith("all goals reached") and "best of 3 candidates" in text, text
     assert len(tab.conv_curves) == 3 and len(tab.last_infos) == 3
     out = tab.current_pulse()
     assert metrics.robustness(out)["A1_norm"] < 1e-8 and abs(metrics.gate(out)["angle_deg"] - 180) < 1e-4
     assert tab.spline_spin.isEnabled()
+    w.close()
+
+
+def test_grape_tab_exploration_presets_and_search():
+    """Presets set the exploration inputs (correlation scales with the duration), editing one gives
+    'custom'; a run with screening rounds and kicks reports the search."""
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    tab.source_box.setCurrentText("rectangular"); tab.dur_spin.setValue(150.0); tab.load_button.click(); process(20)
+    assert tab.preset_box.currentText() == "exploit" and tab.config().n_starts == 1
+    tab.preset_box.setCurrentText("explore")
+    cfg = tab.config()
+    assert (cfg.n_starts, cfg.start_pool, cfg.screen_rounds, cfg.n_kicks, cfg.coarse_levels) == (24, "mix", 3, 8, [8, 16])
+    assert abs(cfg.noise_correlation_us - 15.0) < 1e-9
+    tab.advanced_button.click(); process(20)
+    assert tab.explore_dialog.isVisible()
+    tab.explore_dialog.kicks_spin.setValue(2)
+    assert tab.preset_box.currentText() == "custom" and tab.config().n_kicks == 2
+    tab.explore_dialog.coarse_edit.setText("8, x")
+    tab.solve_button.click()
+    assert not tab.solving and "coarse" in tab.status.text()
+    tab.explore_dialog.hide()
+    # a small search: 4 starts, 1 screening round (4 -> 2), 2 kicks (smoothing on, so kicks are useful)
+    tab.preset_box.setCurrentText("balanced")
+    tab.starts_spin.setValue(4); tab.explore_dialog.rounds_spin.setValue(1); tab.explore_dialog.screen_spin.setValue(8)
+    tab.explore_dialog.kicks_spin.setValue(2); tab.smooth_edit.setText("1e-4")
+    tab.solve_button.click()
+    assert tab.solving and not tab.preset_box.isEnabled() and not tab.explore_dialog.kicks_spin.isEnabled()
+    wait_until(lambda: not tab.solving, 240)
+    text = tab.status.text()
+    assert text.startswith("all goals reached") and "best of 6 candidates" in text and "round 1: 4 candidates" in text, text
+    assert "kicks 1–2" in text and len(tab.last_infos) == 6 and tab.preset_box.isEnabled()
+    out = tab.current_pulse()
+    assert metrics.robustness(out)["A1_norm"] < 1e-8 and abs(metrics.gate(out)["angle_deg"] - 180) < 1e-4
     w.close()
 
 

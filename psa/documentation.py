@@ -167,26 +167,55 @@ like classical GRAPE. The duration and the number of sub-pulses stay those of th
 - Gate goal: none, UR (rotation angle about an axis; the whole rotation) or PP (point to point: initial
   magnetization m0 to a target). For PP the robustness terms only count the error that moves m0.
 - The amplitude limit (100 %) is always kept exactly (built into the parametrization).
+- Even out points (Lawson reweighting, both modes; off by default): least squares minimizes the sum over
+  the points (offsets in local mode, grid points in broadband mode), so the result can be very good at
+  some points and worse in between them / at others. If the goals are not reached everywhere, each round
+  raises the weights of the points with the largest errors, w ← w·(error / mean)^strength, and
+  re-optimizes; this moves towards the smallest worst case (minimax) at the cost of the mean. The round
+  with the smallest worst-point error is kept. Strength 0.5 (default) is damped; 1 is classic Lawson
+  (faster, may oscillate). "point error spread" in the result = worst / mean point error (1 = even).
 - Controls: "every sub-pulse" (classical) or "smooth spline" with M control points per channel (cubic
   B-splines: smooth by construction, few variables, often much faster; needs M ≤ number of sub-pulses).
 - Smoothness weight (0 = off; try 1e-4): prefers smooth u_x, u_y (no spikes). It is soft: the optimizer
   first solves with it, then lowers it step by step (×0.1) until the goals are reached exactly, so the
-  result stays close to the smooth solution.
+  result stays close to the smooth solution. Too strong a weight can lead into a smooth family without a
+  solution: if no candidate reaches the goals with 1e-4 but they do without smoothing, use 1e-5.
 - Max. amplitude rate (%/µs) and max. phase rate (kHz = torsion of the error curve / 2π): soft limits that
   cost nothing below the limit (kept to about 1 %). The phase rate counts in proportion to the amplitude
   (a phase jump where the amplitude is ~0 is harmless). Too strict limits make the goals unreachable.
 - Regularization "stay close to start": adds λ·|u − u_start|² (also lowered step by step).
-- Starts / spread (exploration): several optimizations from perturbed starts run in parallel processes
-  (one residual line each); the result is the best one: goals reached first, then the smoothest (if a
-  smoothness weight is set) or the lowest residual. Spread 0.5 is a large perturbation, 0.05 a small one.
+- Exploration preset: exploit (one start, refined to the end: fastest, finds the nearest solution),
+  balanced (8 smooth perturbations, screening 8 → 4 → 2, then 4 kicks) or explore (24 starts, half of
+  them random pulses, coarse to fine, screening 24 → 12 → 6 → 3, then 8 kicks with temperature). Changing
+  any value gives "custom". The result is the best candidate: goals reached first, then the smoothest (if
+  a smoothness weight is set) or the lowest residual. All candidates run in parallel processes (one
+  residual line each; dropped candidates turn grey).
+- Starts / spread: number of starts and how much starts 2, 3, … differ from the start pulse (0.5 is a
+  large perturbation, 0.05 a small one).
+- Advanced… (the knobs of exploration vs. exploitation):
+  - starts 2, 3, …: perturbations of the start pulse, random pulses, or a mix;
+  - noise correlation (µs): smooth noise changes the large-scale shape of the starts and kicks; white noise
+    mostly adds spikes that the optimizer then removes;
+  - screening rounds (successive halving): every candidate gets "first round" evaluations, the best "kept
+    fraction" continue with twice (1 / fraction) the budget, and so on; after the last round the rest run
+    to the end. More starts and a smaller first round = more exploration for the same compute;
+  - crossover (experimental, genetic): refills a fraction of the dropped places with children of two
+    survivors (a blend, or the first part of one and the rest of the other). In tests it did not beat
+    screening and kicks alone, so the presets leave it off;
+  - kicks: perturb the best result by the kick size, re-optimize, keep it if better. A temperature also
+    accepts a worse result sometimes (probability exp(−Δ/T), Δ = increase of log10 of the residual), which
+    lets the kicks leave a local minimum. Kicks are skipped once the goals are reached, unless a
+    smoothness weight is set (then a smoother solution wins);
+  - coarse to fine: first stages on few spline points (e.g. 8, 16), then the chosen controls. Coarse
+    stages can only change the large-scale shape, so they explore by construction.
 - Start noise: a tiny random change of the first start (seeded). An exactly symmetric start, e.g. a
   constant phase, can otherwise keep the optimizer in a symmetric family of pulses that cannot reach the goal.
 The optimizer (Levenberg–Marquardt with exact Jacobians) runs in the background (Optimize / Stop); the plots
 show the start (dashed), the best pulse so far and the goal residual vs. evaluations. Stopping rules (the
-evaluation limit counts per start), "solved" thresholds and goal weights are the shared solver settings
+evaluation limit counts per candidate), "solved" thresholds and goal weights are the shared solver settings
 ("Settings…"; the finite-difference step is not used: the gradients are exact).
-If all starts converge to about the same residual without reaching the goals, the pulse is most likely too
-short for them (or the limits too strict): try a longer start pulse.
+If all starts and kicks converge to about the same residual without reaching the goals, the pulse is most
+likely too short for them (or the limits too strict): try a longer start pulse.
 """
 
 # the main window's documentation includes the editor description

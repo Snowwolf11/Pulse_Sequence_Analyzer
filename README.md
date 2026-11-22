@@ -360,9 +360,13 @@ far is kept). Evaluation limit, tolerances and goal weights are set in Settings 
 parameters. Robustness is either *local* (cancel the detuning error terms of chosen orders, and optionally
 the first-order B1 error, around a list of offsets) or *broadband* (the gate on an offset × B1 grid). The
 gate goal is none, UR (rotation) or PP (point to point); the 100 % amplitude limit is always kept.
+Optional Lawson reweighting evens out the errors across the offsets / grid points (smaller worst case).
 Against spiky results: a smoothness weight, soft limits of the amplitude and phase rates, or smooth spline
-controls (optional; every sub-pulse stays the default). For exploration, several starts run in parallel
-and the best result is kept. "Stay close to start" regularization is optional. It uses the same solver
+controls (optional; every sub-pulse stays the default). Exploration vs. exploitation is set with a
+preset (exploit / balanced / explore) or in detail: starts (perturbed, smooth or white, or random),
+screening rounds that keep the best candidates and give them more budget, kicks of the best result
+(optionally with a temperature), coarse-to-fine stages and an experimental crossover. All candidates run in
+parallel and the best result is kept. "Stay close to start" regularization is optional. It uses the same solver
 settings.
 
 Conventions: on resonance, unit-speed error curve whose length is the pulse duration, curvature = Rabi

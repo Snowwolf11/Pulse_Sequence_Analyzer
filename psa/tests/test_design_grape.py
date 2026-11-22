@@ -9,8 +9,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 from psa.design import metrics
-from psa.design.grape import (GrapeConfig, GrapeProblem, optimize, optimize_multistart, propagator_and_gradient,
-                               rotation_with_gradient, spline_basis)
+from psa.design.grape import (GrapeConfig, GrapeProblem, Search, control_noise, exploration_preset, optimize,
+                               optimize_multistart, propagator_and_gradient, rotation_with_gradient, run_task, search,
+                               spline_basis, stage_plan, lawson_update)
 from psa.design.optimize import SolverSettings
 from psa.design.pulse import PulseSequence
 from psa.rotations import propagate_batch, quaternion_to_matrix
@@ -47,6 +48,8 @@ def test_gradients_match_finite_differences():
     for name, cfg in CONFIGS.items():
         prob = GrapeProblem(ps, cfg)
         rng = np.random.default_rng(1)
+        if cfg.n_points() > 1:                                   # Lawson weights of the points
+            prob.point_weights = rng.uniform(0.2, 3.0, cfg.n_points())
         p = prob.p0 + rng.normal(0, 0.3, prob.p0.shape)
         res = lambda q: prob.evaluate(prob.to_controls(q)[0])[0]
         u, Mp = prob.to_controls(p)
@@ -189,10 +192,112 @@ def test_multistart():
     assert np.allclose(best2.amplitude, best.amplitude) and info2["start_index"] == info["start_index"]
 
 
+def test_resumable_optimize():
+    """A run in small budgets (paused, resumed from its state) reaches the goals like one long run; the
+    evaluation count adds up; a state may also give the controls w of a new candidate."""
+    cfg = robust_inversion(smooth_weight=1e-4)
+    start = rectangular(100, 0, 200)
+    st = SolverSettings(max_nfev=400)
+    state, calls, total = None, 0, 0
+    while True:
+        out, info = optimize(start, cfg, st, state=state, budget=5)
+        calls += 1
+        assert info["nfev"] - (state["nfev"] if state else 0) <= 5
+        total = info["nfev"]
+        if info["finished"]:
+            break
+        assert info["stop_reason"] == "paused" and not info["cancelled"]
+        state = info["state"]
+    assert info["reached"] and calls > 2 and total <= 400 and info["stage"] == info["n_stages"] - 1
+    w = np.asarray(info["w"])
+    out2, info2 = optimize(start, cfg, st, state={"stage": info["n_stages"] - 1, "w": w.tolist()})
+    assert info2["reached"] and info2["nfev"] <= 5                   # already a solution
+
+
+def test_coarse_to_fine():
+    cfg = robust_inversion(coarse_levels=[8, 16, 5000])
+    plan = stage_plan(cfg, 300)
+    assert [(c, m) for c, m, _, _ in plan] == [("spline", 8), ("spline", 16), ("full", 20)]
+    assert [m for _, m, _, _ in stage_plan(robust_inversion(coarse_levels=[8, 16], controls="spline", n_spline=12), 300)] == [8, 12]
+    out, info = optimize(rectangular(100, 0, 150), cfg, SolverSettings(max_nfev=400))
+    assert info["reached"] and info["stage"] == 2 and out.N == 300
+    assert metrics.robustness(out)["A1_norm"] < 1e-8
+
+
+def test_control_noise():
+    rng = np.random.default_rng(0)
+    white = control_noise(1000, DT, 0.5, 0.0, rng)
+    smooth = control_noise(1000, DT, 0.5, 20.0, rng)
+    for z in (white, smooth):
+        assert z.shape == (2000,) and abs(np.sqrt(np.mean(z[:1000] ** 2)) - 0.5) < 0.05       # RMS = size
+    rough = lambda z: np.mean(np.diff(z[:1000]) ** 2)
+    assert rough(smooth) < rough(white) / 100
+
+
+def test_search_screening_crossover_kicks():
+    """Successive halving (6 -> 3 -> 2 with crossover children), then kicks (smoothing on: smoother wins);
+    serial and parallel runs give the same result."""
+    cfg = robust_inversion(smooth_weight=1e-4, n_starts=6, start_pool="mix", noise_correlation_us=10.0,
+                           screen_rounds=2, screen_nfev=8, keep_fraction=0.5, crossover_rate=1.0, n_kicks=2,
+                           kick_size=0.2, kick_temperature=0.3)
+    start = rectangular(100, 0, 150)
+    st = SolverSettings(max_nfev=200)
+    s = Search(start, cfg, st, parallel=2)
+    kinds = []
+    while not s.done:
+        for t in s.tasks():
+            kinds.append(s.cands[t["cid"]]["kind"])
+            s.submit(run_task(t))
+    cid, best, info = s.best()
+    assert info["reached"] and kinds.count("kick") == 2 and "child" in kinds
+    assert s.log[0].startswith("round 1: 6 candidates, 8 evaluations each → kept 3 + 3 crossover children"), s.log
+    assert s.log[1].startswith("round 2: 6 candidates, 16 evaluations each → kept 3 + 3"), s.log
+    assert info["search"]["candidates"] == 6 + 3 + 3 + 2 and info["search"]["kicks"] == 2
+    reached = [i for i in s.infos() if i["reached"]]
+    assert info["values"]["roughness"] == min(i["values"]["roughness"] for i in reached)
+    best2, info2, _ = search(start, cfg, st, processes=3)
+    assert np.allclose(best2.amplitude, best.amplitude) and info2["search"]["best"] == cid
+    # reached without smoothing: no kicks needed, the search ends after the round that solved it
+    _, info3, _ = search(start, robust_inversion(n_starts=2, n_kicks=3), st)
+    assert info3["reached"] and info3["search"]["kicks"] == 0
+
+
+def test_exploration_presets():
+    for name in ("exploit", "balanced", "explore"):
+        d = exploration_preset(name, 200e-6)
+        robust_inversion(**d).check()
+    assert exploration_preset("explore", 200e-6)["noise_correlation_us"] == 20.0
+
+
+def test_lawson_reweighting():
+    """Weights grow with the point errors (normalized to mean 1); reweight stages only with several points;
+    the worst point gets better, the errors more even (local and broadband)."""
+    w = lawson_update(np.ones(3), [1.0, 2.0, 4.0], 1.0)
+    assert abs(np.mean(w) - 1) < 1e-12 and w[0] < w[1] < w[2] and abs(w[2] / w[0] - 4) < 1e-9
+    assert [k for *_, k in stage_plan(robust_inversion(reweight_rounds=3), 100)] == ["main"]          # one offset
+    assert [k for *_, k in stage_plan(robust_inversion(reweight_rounds=2).replace(offsets_hz=[-1e3, 1e3]), 100)] == \
+        ["main", "reweight", "reweight"]
+    st = SolverSettings(max_nfev=1500)
+    bb = GrapeConfig(mode="broadband", gate="PP", m0=[0, 0, 1], m_target=[1, 0, 0], bb_offset_min_hz=-10000,
+                     bb_offset_max_hz=10000, bb_offset_n=7)
+    _, plain = optimize(rectangular(100, 0, 60), bb, st)
+    _, even = optimize(rectangular(100, 0, 60), bb.replace(reweight_rounds=10), st)
+    assert not plain["reached"] and plain["point_weights"] is None and len(even["point_weights"]) == 7
+    assert max(even["point_errors"]) < 0.95 * max(plain["point_errors"])                  # smaller worst case
+    assert even["values"]["point error spread"] < plain["values"]["point error spread"] - 0.1
+    # local mode (offsets are the points): the rounds run and never make the worst offset worse
+    loc = GrapeConfig(mode="local", offsets_hz=[-1000.0, 4000.0], orders=[1], gate="PP", m0=[0, 0, 1], m_target=[1, 0, 0])
+    _, plain = optimize(rectangular(100, 0, 30), loc, st)
+    _, even = optimize(rectangular(100, 0, 30), loc.replace(reweight_rounds=5), st)
+    assert plain["stop_reason"] == "converged" and even["nfev"] > plain["nfev"] and len(even["point_weights"]) == 2
+    assert max(even["point_errors"]) <= max(plain["point_errors"]) * (1 + 1e-9)
+
 def test_config_validation():
     for bad in (GrapeConfig(mode="broadband", gate="none"), GrapeConfig(mode="local", orders=[], gate="none"),
                 GrapeConfig(mode="local", offsets_hz=[]), GrapeConfig(controls="spline", n_spline=3),
-                GrapeConfig(max_phase_rate_khz=-1), GrapeConfig(n_starts=0)):
+                GrapeConfig(max_phase_rate_khz=-1), GrapeConfig(n_starts=0),
+                GrapeConfig(start_pool="x"), GrapeConfig(keep_fraction=1.0), GrapeConfig(crossover_rate=2),
+                GrapeConfig(coarse_levels=[3]), GrapeConfig(reweight_power=0), GrapeConfig(reweight_rounds=-1), GrapeConfig(screen_nfev=1), GrapeConfig(n_kicks=-1)):
         try:
             bad.check()
         except ValueError:

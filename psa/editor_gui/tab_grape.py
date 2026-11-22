@@ -2,8 +2,9 @@
 
 Start pulse: the current pulse of another tab, a rectangular pulse or a random one. Robustness: local
 (Taylor orders of the detuning error, SCQC, at a list of offsets; optional first-order B1) or classical
-broadband (the gate on a grid of offsets x amplitude scalings). Gate goal: none, UR or PP. The optimization
-runs in a separate process (psa.design.grape.run_grape_job); the plots follow the best pulse so far.
+broadband (the gate on a grid of offsets x amplitude scalings). Gate goal: none, UR or PP. Exploration: a
+preset (exploit / balanced / explore) or custom values (Advanced…) of the population search
+(psa.design.grape.Search); its tasks run in worker processes (grape_worker), the plots follow the best pulse.
 """
 from __future__ import annotations
 
@@ -15,11 +16,11 @@ import time
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox,
-                               QHBoxLayout, QLabel, QLineEdit, QPushButton, QRadioButton, QSpinBox, QSplitter,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+                               QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QRadioButton,
+                               QSpinBox, QSplitter, QVBoxLayout, QWidget)
 
-from psa.design.grape import GrapeConfig, run_grape_job, selection_key
+from psa.design.grape import EXPLORATION_PRESETS, GrapeConfig, Search, exploration_preset, grape_worker
 from psa.design.optimize import SolverSettings
 from psa.design.pulse import PulseSequence
 from psa.editor_gui.widgets import ACCENT, ACCENT_2, BAD, GOOD, MUTED_FG, lock_heights, make_plot
@@ -27,6 +28,84 @@ from psa.editor_gui.widgets import ACCENT, ACCENT_2, BAD, GOOD, MUTED_FG, lock_h
 START_COLORS = ("#f59e0b", "#a78bfa", "#34d399", "#f472b6", "#60a5fa", "#fbbf24", "#f87171", "#2dd4bf")
 SOURCES = ("Text tab", "Waveform tab", "Curve families tab", "Curve builder tab", "Import curve tab",
            "rectangular", "random")
+
+
+PRESETS = ("exploit", "balanced", "explore", "custom")
+PRESET_TIPS = {
+    "exploit": "one start, refined to the end (fast; finds the nearest solution)",
+    "balanced": "8 smooth perturbations of the start, 2 screening rounds (8 → 4 → 2), then 4 kicks of the best",
+    "explore": "24 starts (half random, smooth spread), coarse-to-fine (8, 16 spline points), 3 screening rounds "
+               "(24 → 12 → 6 → 3), then 8 kicks with temperature",
+    "custom": "your own values (Advanced…)",
+}
+DEAD_PEN = pg.mkPen("#6b7280", width=0.7)
+
+
+class ExplorationDialog(QDialog):
+    """Advanced exploration settings of the GRAPE tab (non-modal; values are read when Optimize starts)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("GRAPE exploration")
+        f = QFormLayout(self)
+        intro = QLabel("Starts: how different they are. Screening: many cheap starts, the best fraction continues with "
+                       "twice the budget each round (more starts / smaller first budget = more exploration). Kicks: "
+                       "perturb the best result and re-optimize. Coarse to fine: first only the large-scale shape.")
+        intro.setWordWrap(True); intro.setStyleSheet(f"color: {MUTED_FG};")
+        f.addRow(intro)
+        self.pool_box = QComboBox(); self.pool_box.addItems(["perturb the start", "random pulses", "mix"])
+        self.pool_box.setToolTip("starts 2, 3, …: perturbations of the start pulse (by the spread), random pulses, or "
+                                 "alternately both")
+        f.addRow("starts 2, 3, … :", self.pool_box)
+        self.corr_spin = QDoubleSpinBox(); self.corr_spin.setRange(0, 1e5); self.corr_spin.setDecimals(2)
+        self.corr_spin.setSuffix(" µs"); self.corr_spin.setSpecialValueText("white")
+        self.corr_spin.setToolTip("correlation time of the start and kick noise: smooth noise changes the large-scale "
+                                  "shape, white noise mostly adds spikes; white = 0")
+        f.addRow("noise correlation:", self.corr_spin)
+        self.rounds_spin = QSpinBox(); self.rounds_spin.setRange(0, 20); self.rounds_spin.setSpecialValueText("off")
+        self.rounds_spin.setToolTip("successive halving: after each round only the best fraction continues; off = every "
+                                    "start runs to the end")
+        f.addRow("screening rounds:", self.rounds_spin)
+        self.screen_spin = QSpinBox(); self.screen_spin.setRange(2, 10 ** 6); self.screen_spin.setSuffix(" evaluations")
+        self.screen_spin.setToolTip("budget per candidate in round 1 (then ÷ kept fraction per round)")
+        f.addRow("first round:", self.screen_spin)
+        self.keep_spin = QDoubleSpinBox(); self.keep_spin.setRange(0.05, 0.95); self.keep_spin.setSingleStep(0.05)
+        self.keep_spin.setDecimals(2)
+        self.keep_spin.setToolTip("fraction of the candidates kept after each round")
+        f.addRow("kept fraction:", self.keep_spin)
+        self.cross_spin = QDoubleSpinBox(); self.cross_spin.setRange(0, 1); self.cross_spin.setSingleStep(0.1)
+        self.cross_spin.setDecimals(2); self.cross_spin.setSpecialValueText("off")
+        self.cross_spin.setToolTip("experimental (genetic): this fraction of the dropped places is refilled with children "
+                                   "of two survivors (a blend, or the first part of one and the rest of the other); off = 0")
+        f.addRow("crossover (experimental):", self.cross_spin)
+        self.kicks_spin = QSpinBox(); self.kicks_spin.setRange(0, 1000); self.kicks_spin.setSpecialValueText("off")
+        self.kicks_spin.setToolTip("after the starts: perturb the best result and re-optimize, keep it if better "
+                                   "(skipped once the goals are reached, unless smoothing is on: then smoother wins)")
+        f.addRow("kicks:", self.kicks_spin)
+        self.kick_size_spin = QDoubleSpinBox(); self.kick_size_spin.setRange(0, 10); self.kick_size_spin.setDecimals(3)
+        self.kick_size_spin.setSingleStep(0.05)
+        self.kick_size_spin.setToolTip("size of a kick (same units as the spread)")
+        f.addRow("kick size:", self.kick_size_spin)
+        self.temp_spin = QDoubleSpinBox(); self.temp_spin.setRange(0, 10); self.temp_spin.setDecimals(2)
+        self.temp_spin.setSingleStep(0.1); self.temp_spin.setSpecialValueText("off")
+        self.temp_spin.setToolTip("accept a worse kick with probability exp(−Δ / T), Δ = increase of log10(residual) "
+                                  "(or of the roughness); lets the kicks leave a local minimum; off = only improvements")
+        f.addRow("kick temperature:", self.temp_spin)
+        self.coarse_edit = QLineEdit("")
+        self.coarse_edit.setToolTip("comma-separated spline control points of coarse stages run first (e.g. 8, 16); "
+                                    "empty = off")
+        f.addRow("coarse to fine:", self.coarse_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.hide)
+        f.addRow(buttons)
+        self.widgets = [self.pool_box, self.corr_spin, self.rounds_spin, self.screen_spin, self.keep_spin,
+                        self.cross_spin, self.kicks_spin, self.kick_size_spin, self.temp_spin, self.coarse_edit]
+
+    def coarse_levels(self):
+        try:
+            return [int(t) for t in self.coarse_edit.text().replace(";", ",").split(",") if t.strip()]
+        except ValueError:
+            raise ValueError(f"coarse to fine: '{self.coarse_edit.text()}' is not a comma-separated list of integers")
 
 
 def vector_row(values, rng=(-1.0, 1.0)):
@@ -52,7 +131,8 @@ class GrapeTab(QWidget):
         self.result = None
         self.settings_provider = None         # callable() -> SolverSettings
         self._process = None
-        self._history = []
+        self._workers = []
+        self._history = {}
         outer = QHBoxLayout(self)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         outer.addWidget(splitter)
@@ -115,6 +195,20 @@ class GrapeTab(QWidget):
             bg.addRow("", c)
             self.bb_spins[key] = (a, b, c)
         rl.addWidget(self.bb_widget)
+        lrow = QHBoxLayout()
+        self.reweight_spin = QSpinBox(); self.reweight_spin.setRange(0, 1000); self.reweight_spin.setSpecialValueText("off")
+        self.reweight_spin.setSuffix(" rounds")
+        self.reweight_spin.setToolTip("Lawson reweighting (both modes): if the goals are not reached at every point, each "
+                                      "round raises the weights of the points (offsets / grid points) with the largest "
+                                      "errors and re-optimizes. Evens out the errors: a smaller worst case at the cost "
+                                      "of the mean. The round with the smallest worst-point error is kept; off = 0")
+        self.reweight_power_spin = QDoubleSpinBox(); self.reweight_power_spin.setRange(0.05, 4); self.reweight_power_spin.setDecimals(2)
+        self.reweight_power_spin.setSingleStep(0.1); self.reweight_power_spin.setValue(0.5)
+        self.reweight_power_spin.setToolTip("strength p of the update w ← w·(error / mean error)^p: 1 is classic Lawson "
+                                            "(fast, may oscillate), 0.5 is damped")
+        lrow.addWidget(QLabel("even out points:")); lrow.addWidget(self.reweight_spin)
+        lrow.addWidget(QLabel("strength:")); lrow.addWidget(self.reweight_power_spin); lrow.addStretch()
+        rl.addLayout(lrow)
         self.local_radio.toggled.connect(self._mode_changed)
         ll.addWidget(rbox)
 
@@ -155,7 +249,8 @@ class GrapeTab(QWidget):
         self.spline_spin.setEnabled(False)
         self.smooth_edit = QLineEdit("0")
         self.smooth_edit.setToolTip("weight w of the smoothness term w·N·Σ|u(k+1) − u(k)|² (soft; lowered step by step "
-                                    "until the goals are reached exactly). Try 1e-4. 0 = off")
+                                    "until the goals are reached exactly). Try 1e-4; if no start reaches the goals, 1e-5 (short pulses need faster "
+                                    "modulation). 0 = off")
         cf.addRow("smoothness weight:", self.smooth_edit)
         self.amp_rate_spin = QDoubleSpinBox(); self.amp_rate_spin.setRange(0, 1e6); self.amp_rate_spin.setDecimals(2)
         self.amp_rate_spin.setSuffix(" %/µs"); self.amp_rate_spin.setSpecialValueText("off")
@@ -177,9 +272,20 @@ class GrapeTab(QWidget):
         # ---- exploration and solver
         obox = QGroupBox("Exploration and solver")
         of = QFormLayout(obox)
+        self.explore_dialog = ExplorationDialog(self)
+        prow = QHBoxLayout()
+        self.preset_box = QComboBox(); self.preset_box.addItems(PRESETS)
+        for i, name in enumerate(PRESETS):
+            self.preset_box.setItemData(i, PRESET_TIPS[name], Qt.ItemDataRole.ToolTipRole)
+        self.preset_box.setToolTip("exploitation ↔ exploration; the details are under Advanced…")
+        self.preset_box.currentTextChanged.connect(self._preset_changed)
+        self.advanced_button = QPushButton("Advanced…"); self.advanced_button.clicked.connect(self._open_advanced)
+        prow.addWidget(self.preset_box); prow.addWidget(self.advanced_button); prow.addStretch()
+        of.addRow("exploration:", prow)
         mrow = QHBoxLayout()
         self.starts_spin = QSpinBox(); self.starts_spin.setRange(1, 64); self.starts_spin.setValue(1)
-        self.starts_spin.setToolTip("several optimizations from perturbed starts, in parallel processes; the best "
+        self.starts_spin.setRange(1, 1000)
+        self.starts_spin.setToolTip("several optimizations from different starts, in parallel processes; the best "
                                     "result is kept (reached goals first, then the smoothest / lowest residual)")
         self.spread_spin = QDoubleSpinBox(); self.spread_spin.setRange(0, 10); self.spread_spin.setDecimals(3)
         self.spread_spin.setSingleStep(0.1); self.spread_spin.setValue(0.5)
@@ -238,7 +344,12 @@ class GrapeTab(QWidget):
         splitter.addWidget(right)
         splitter.setStretchFactor(1, 2)
 
+        self._applying = False
+        for wdg in [self.starts_spin, self.spread_spin] + self.explore_dialog.widgets:
+            sig = getattr(wdg, "valueChanged", None) or getattr(wdg, "currentIndexChanged", None) or wdg.textEdited
+            sig.connect(self._mark_custom)
         self._mode_changed(); self._gate_changed(); self._source_changed(self.source_box.currentText())
+        self.apply_preset("exploit")
         lock_heights(self)
         self.load_start()
 
@@ -260,6 +371,50 @@ class GrapeTab(QWidget):
         self.amp_spin.setEnabled(text == "rectangular")
         self.phase_spin.setEnabled(text == "rectangular")
         self.seed_spin.setEnabled(text == "random")
+
+    # -------------------------------------------------------- exploration ---
+    def _duration_s(self):
+        return self.start_pulse.duration if self.start_pulse is not None else self.dur_spin.value() * 1e-6
+
+    def apply_preset(self, name):
+        """Set the exploration inputs to a preset (the noise correlation scales with the pulse duration)."""
+        if name not in EXPLORATION_PRESETS:
+            return
+        d = exploration_preset(name, self._duration_s())
+        dlg = self.explore_dialog
+        self._applying = True
+        try:
+            self.preset_box.setCurrentText(name)
+            self.starts_spin.setValue(d["n_starts"]); self.spread_spin.setValue(d["multistart_noise"])
+            dlg.pool_box.setCurrentIndex(("perturb", "random", "mix").index(d["start_pool"]))
+            dlg.corr_spin.setValue(d["noise_correlation_us"]); dlg.rounds_spin.setValue(d["screen_rounds"])
+            dlg.screen_spin.setValue(d["screen_nfev"]); dlg.keep_spin.setValue(d["keep_fraction"])
+            dlg.cross_spin.setValue(d["crossover_rate"]); dlg.kicks_spin.setValue(d["n_kicks"])
+            dlg.kick_size_spin.setValue(d["kick_size"]); dlg.temp_spin.setValue(d["kick_temperature"])
+            dlg.coarse_edit.setText(", ".join(str(m) for m in d["coarse_levels"]))
+        finally:
+            self._applying = False
+        self._preset_tip(name)
+
+    def _preset_changed(self, name):
+        if not self._applying:
+            if name == "custom":
+                self._preset_tip(name)
+            else:
+                self.apply_preset(name)
+
+    def _mark_custom(self, *args):
+        if not self._applying and self.preset_box.currentText() != "custom":
+            self._applying = True
+            self.preset_box.setCurrentText("custom")
+            self._applying = False
+            self._preset_tip("custom")
+
+    def _preset_tip(self, name):
+        self.preset_box.setToolTip(f"{name}: {PRESET_TIPS[name]}\n(exploitation ↔ exploration; details under Advanced…)")
+
+    def _open_advanced(self):
+        self.explore_dialog.show(); self.explore_dialog.raise_(); self.explore_dialog.activateWindow()
 
     def config(self) -> GrapeConfig:
         """GrapeConfig from the inputs (raises ValueError with a readable message)."""
@@ -292,11 +447,20 @@ class GrapeTab(QWidget):
             start_noise=self.noise_spin.value(), controls="spline" if self.spline_radio.isChecked() else "full",
             n_spline=self.spline_spin.value(), smooth_weight=smooth, max_amp_rate=self.amp_rate_spin.value(),
             max_phase_rate_khz=self.phase_rate_spin.value(), n_starts=self.starts_spin.value(),
-            multistart_noise=self.spread_spin.value())
+            multistart_noise=self.spread_spin.value(), reweight_rounds=self.reweight_spin.value(),
+            reweight_power=self.reweight_power_spin.value(), **self._exploration_fields())
         if cfg.controls == "spline" and self.start_pulse is not None and cfg.n_spline > self.start_pulse.N:
             raise ValueError(f"more spline control points ({cfg.n_spline}) than sub-pulses ({self.start_pulse.N})")
         cfg.check()
         return cfg
+
+    def _exploration_fields(self):
+        d = self.explore_dialog
+        return dict(start_pool=("perturb", "random", "mix")[d.pool_box.currentIndex()],
+                    noise_correlation_us=d.corr_spin.value(), screen_rounds=d.rounds_spin.value(),
+                    screen_nfev=d.screen_spin.value(), keep_fraction=d.keep_spin.value(),
+                    crossover_rate=d.cross_spin.value(), n_kicks=d.kicks_spin.value(), kick_size=d.kick_size_spin.value(),
+                    kick_temperature=d.temp_spin.value(), coarse_levels=d.coarse_levels())
 
     # -------------------------------------------------------------- start ---
     def load_start(self):
@@ -328,6 +492,8 @@ class GrapeTab(QWidget):
         self.amp_start.setData(x, ps.amplitude); self.phase_start.setData(x, ps.phase)
         self.amp_curve.setData([], []); self.phase_curve.setData([], [])
         self._show("")
+        if self.preset_box.currentText() in EXPLORATION_PRESETS:
+            self.apply_preset(self.preset_box.currentText())
         self.pulseChanged.emit(self.start_pulse)
 
     def result_as_start(self):
@@ -377,7 +543,8 @@ class GrapeTab(QWidget):
         return [self.source_box, self.load_button, self.restart_button, self.settings_button, self.local_radio,
                 self.bb_radio, self.local_widget, self.bb_widget, self.gate_box, self.ur_widget, self.pp_widget,
                 self.reg_box, self.reg_weight, self.noise_spin, self.full_radio, self.spline_radio, self.spline_spin,
-                self.smooth_edit, self.amp_rate_spin, self.phase_rate_spin, self.starts_spin, self.spread_spin] + self.gen_widgets
+                self.smooth_edit, self.amp_rate_spin, self.phase_rate_spin, self.starts_spin, self.spread_spin,
+                self.preset_box, self.reweight_spin, self.reweight_power_spin] + self.gen_widgets + self.explore_dialog.widgets
 
     def _set_inputs_enabled(self, on):
         for w in self._inputs():
@@ -400,19 +567,24 @@ class GrapeTab(QWidget):
             self._show(str(e), BAD)
             return
         settings = (self.settings_provider() if self.settings_provider else None) or SolverSettings()
-        ps = self.start_pulse
         self._cfg = cfg
-        self._job = {"pulse": [np.minimum(ps.amplitude, 100.0).tolist(), ps.phase.tolist(), ps.dt, ps.umax],
-                     "config": cfg.to_dict(), "settings": settings.to_dict()}
+        n_workers = min(self.max_parallel(), max(int(cfg.n_starts), min(int(cfg.n_kicks), self.max_parallel()), 1))
+        try:
+            self._search = Search(self.start_pulse, cfg, settings, parallel=n_workers)
+        except ValueError as e:
+            self._show(str(e), BAD)
+            return
         self._limit, self._started = settings.max_nfev, time.time()
         self._clear_convergence()
-        self._pending = list(range(int(cfg.n_starts)))
-        self._running, self._done, self._errors, self._current = {}, {}, {}, {}
+        self._current = {}
         ctx = mp.get_context("spawn")
-        self._ctx = ctx
-        self._queue, self._stop_event = ctx.Queue(), ctx.Event()
+        self._tasks, self._queue, self._stop_event = ctx.Queue(), ctx.Queue(), ctx.Event()
+        self._workers = [ctx.Process(target=grape_worker, args=(self._tasks, self._queue, self._stop_event), daemon=True)
+                         for _ in range(n_workers)]
+        for proc in self._workers:
+            proc.start()
         self._process = True
-        self._launch()
+        self._dispatch()
         self._stop_requested_at = None
         self._poll = QTimer(self); self._poll.setInterval(100); self._poll.timeout.connect(self._poll_queue)
         self._poll.start()
@@ -420,36 +592,50 @@ class GrapeTab(QWidget):
         self._set_inputs_enabled(False)
         self._show("starting optimizer …")
 
-    def _launch(self):
-        while self._pending and len(self._running) < self.max_parallel() and not self._stop_event.is_set():
-            i = self._pending.pop(0)
-            job = dict(self._job, start_index=i)
-            proc = self._ctx.Process(target=run_grape_job, args=(job, self._queue, self._stop_event), daemon=True)
-            proc.start()
-            self._running[i] = proc
+    def _dispatch(self):
+        for task in self._search.tasks():
+            self._tasks.put(task)
+        if self._search.done:
+            self._end_workers()
+
+    def _end_workers(self):
+        for _ in self._workers:
+            self._tasks.put(None)
 
     def stop(self, wait=False):
         if not self.solving:
             return
         self._stop_event.set()
-        self._pending = []
+        self._search.stop()
         if self._stop_requested_at is None:
             self._stop_requested_at = time.time()
         self._show("stopping …")
         if wait:
-            for proc in self._running.values():
+            self._end_workers()
+            for proc in self._workers:
                 proc.join(5)
                 if proc.is_alive():
                     proc.terminate()
             self._finish()
 
     def _progress_text(self):
-        n = int(self._cfg.n_starts)
+        s = self._search
         best = min(self._current.values()) if self._current else float("nan")
-        evals = sum(self._history.get(i, ([0], None))[0][-1] for i in self._history) if self._history else 0
-        multi = f"start {len(self._done) + len(self._errors)} done / {n}, {len(self._running)} running, " if n > 1 else ""
-        return (f"optimizing … {multi}{evals} evaluations (limit {self._limit} per start), "
+        evals = sum(h[0][-1] for h in self._history.values() if h[0])
+        if s.phase == "rounds":
+            n = int(self._cfg.screen_rounds)
+            stage = (f"round {s.round + 1} of {n + 1}" if n and s.round < n else
+                     "final round" if n else (f"{len(s.cands)} starts" if len(s.cands) > 1 else ""))
+        else:
+            stage = f"kicks ({s.kicks_done} of {int(self._cfg.n_kicks)})"
+        alive = sum(1 for c in s.cands.values() if c["alive"])
+        multi = f"{stage}, {alive} candidates, {s.running} running, " if len(s.cands) > 1 or s.phase != "rounds" else ""
+        return (f"optimizing … {multi}{evals} evaluations (limit {self._limit} per candidate), "
                 f"{time.time() - self._started:.0f} s, best goal residual {best:.2e}  (click Stop to interrupt)")
+
+    def _set_history(self, cid, n, c):
+        self._history[cid] = (n, c)
+        self._conv_curve(cid).setData(np.array(n, float), np.maximum(np.array(c, float), 1e-300))
 
     def _poll_queue(self):
         changed = False
@@ -459,106 +645,124 @@ class GrapeTab(QWidget):
             except queue_module.Empty:
                 break
             except (EOFError, OSError):
-                msg = ("error", -1, "an optimizer process ended unexpectedly")
-            kind, i = msg[0], msg[1]
+                self._search.stop()
+                self._failure = "an optimizer process ended unexpectedly"
+                break
+            kind = msg[0]
             if kind == "progress":
-                n, c = self._history.setdefault(i, ([], []))
-                n.append(msg[2]); c.append(msg[3])
-                self._conv_curve(i).setData(np.array(n, float), np.maximum(np.array(c), 1e-300))
-                self._current[i] = msg[3]
+                cid = msg[1]
+                n, c = self._history.get(cid, ([], []))
+                self._set_history(cid, n + [msg[2]], c + [msg[3]])
+                self._current[cid] = msg[3]
                 changed = True
             elif kind == "snapshot":
-                self._current[i] = msg[4]
-                if msg[4] <= min(self._current.values()):           # show the start that is best right now
+                cid = msg[1]
+                self._current[cid] = msg[4]
+                if msg[4] <= min(self._current.values()):           # show the candidate that is best right now
                     ps = PulseSequence(np.asarray(msg[2]), np.asarray(msg[3]), self.start_pulse.dt, self.start_pulse.umax)
                     self.result = ps
                     self._show_result(ps)
                     self.pulseChanged.emit(ps)
             elif kind == "done":
-                info = msg[4]
-                self._done[i] = (msg[2], msg[3], info)
-                self._current[i] = info["goal_residual"]
-                hist = np.asarray(info.get("history", []), float)
-                if len(hist):
-                    offset = max(0, info["nfev"] - len(hist))
-                    self._conv_curve(i).setData(np.arange(1, len(hist) + 1) + offset, np.maximum(hist, 1e-300))
-                    self._history[i] = ([info["nfev"]], [info["goal_residual"]])
-                self._reap(i)
-                changed = True
-            elif kind == "error":
-                self._errors[i] = msg[2]
-                self._reap(i)
+                res = msg[1]
+                cid = res["cid"]
+                info = res.get("info")
+                if info is not None:
+                    self._current[cid] = info["goal_residual"]
+                    hist = list(np.asarray(info.get("history", []), float))
+                    if hist:
+                        n0 = info["nfev"] - len(hist)
+                        n, c = self._history.get(cid, ([], []))
+                        keep = [k for k, v in enumerate(n) if v <= n0]
+                        self._set_history(cid, [n[k] for k in keep] + list(range(n0 + 1, info["nfev"] + 1)),
+                                          [c[k] for k in keep] + hist)
+                rnd = (self._search.phase, self._search.round)
+                self._search.submit(res)
+                if (self._search.phase, self._search.round) != rnd:
+                    self._recolor()
+                self._dispatch()
                 changed = True
         if self._stop_requested_at is not None and time.time() - self._stop_requested_at > 5:
-            for proc in self._running.values():
+            for proc in self._workers:
                 proc.terminate()
-            self._running = {}
-        for i, proc in list(self._running.items()):          # crashed without a message
-            if not proc.is_alive() and self._queue.empty():
-                proc.join(0.1)
-                if i in self._running:
-                    self._errors[i] = "the optimizer process ended without a result"
-                    self._reap(i)
-        if not self._running and not self._pending:
+            self._search.phase = "done"
+        if not self._search.done and not any(p.is_alive() for p in self._workers) and self._queue.empty():
+            self._failure = "the optimizer processes ended without a result"
+            self._search.phase = "done"
+        if self._search.done and (not self._search.running or self._stop_requested_at is not None
+                                  or not any(p.is_alive() for p in self._workers)):
             self._complete()
         elif changed:
             self._show(self._progress_text())
 
-    def _reap(self, i):
-        proc = self._running.pop(i, None)
-        if proc is not None:
-            proc.join(1)
-        self._launch()
+    def _recolor(self, best=None):
+        for cid, curve in self.conv_curves.items():
+            c = self._search.cands.get(cid)
+            if c is not None and not c["alive"] and cid != best:
+                curve.setPen(DEAD_PEN)
+            else:
+                curve.setPen(pg.mkPen(START_COLORS[cid % len(START_COLORS)], width=3 if cid == best else 1.5))
 
     def _complete(self):
         self._finish()
-        if not self._done:
-            err = next(iter(self._errors.values()), "optimizer terminated (no result)")
-            self._show(err, BAD)
+        try:
+            cid, pulse, info = self._search.best()
+        except RuntimeError as e:
+            self._show(getattr(self, "_failure", None) or str(e) or "optimizer terminated (no result)", BAD)
             return
-        i, (amp, phase, info) = min(self._done.items(), key=lambda kv: selection_key(self._cfg, kv[1][2]))
-        self.result = PulseSequence(np.asarray(amp), np.asarray(phase), self.start_pulse.dt, self.start_pulse.umax)
+        self.result = pulse
         self._show_result(self.result)
-        for j, curve in self.conv_curves.items():
-            curve.setPen(pg.mkPen(START_COLORS[j % len(START_COLORS)], width=3 if j == i else 1))
-        self.last_infos = {j: v[2] for j, v in self._done.items()}
-        self._report(info, best_index=i)
+        self._recolor(best=cid)
+        self.last_infos = {k: c["info"] for k, c in self._search.cands.items() if c["info"] is not None}
+        self._report(info)
         self.pulseChanged.emit(self.result)
 
     def _finish(self):
         if getattr(self, "_poll", None) is not None:
             self._poll.stop()
             self._poll = None
+        if getattr(self, "_workers", None):
+            self._end_workers()
+        for proc in getattr(self, "_workers", []):
+            proc.join(0.5)
+            if proc.is_alive():
+                proc.terminate()
+        self._workers = []
         self._process = None
         self.solve_button.setText("Optimize")
         self._set_inputs_enabled(True)
 
-    def _report(self, info, best_index=0):
+    def _report(self, info):
         reason = info.get("stop_reason")
         if info["reached"]:
             state = "all goals reached"
         else:
             state = {"user": "stopped – best so far", "limit": "evaluation limit reached – best so far",
-                     "time": "time limit reached – best so far"}.get(reason, "converged, goals not fully reached")
+                     "time": "time limit reached – best so far", "paused": "stopped – best so far"}.get(
+                reason, "converged, goals not fully reached")
         fmt = lambda d: ", ".join(f"{k} = {v:.3g}" for k, v in d.items())
-        n = int(self._cfg.n_starts)
+        srch = info.get("search", {})
+        n, evals = srch.get("candidates", 1), srch.get("evaluations", info["nfev"])
         if n > 1:
-            solved = sum(1 for v in self._done.values() if v[2]["reached"])
-            state += f" – best of {n} starts: start {best_index + 1} ({solved} reached the goals)"
-        self._show(f"{state} ({info['nfev']} evaluations, {info.get('elapsed_s', 0):.1f} s)\nresult: {fmt(info['values'])}"
-                   f"\nstart: {fmt(info.get('start_summary', {}))}", GOOD if info["reached"] else BAD)
+            kind = {"start": "start", "child": "crossover child", "kick": "kick"}.get(srch.get("kind"), "candidate")
+            state += f" – best of {n} candidates: {kind} {srch.get('best', 0) + 1} ({srch.get('reached', 0)} reached the goals)"
+        log = "\n".join(srch.get("log", [])) if n > 1 else ""
+        self._show(f"{state} ({evals} evaluations, {time.time() - self._started:.1f} s)\nresult: {fmt(info['values'])}"
+                   f"\nstart: {fmt(info.get('start_summary', {}))}" + (f"\nsearch: {log}" if log else ""),
+                   GOOD if info["reached"] else BAD)
 
     def _show(self, text, color=None):
         self.status.setStyleSheet(f"color: {color};" if color else "")
         self.status.setText(text)
-        self._fit_status()
+        self._fit_label(self.status)
 
-    def _fit_status(self):
+    @staticmethod
+    def _fit_label(label):
         # a word-wrapped label under-reports its height: reserve the wrapped height so that the layout
         # (inside the scroll area) grows instead of squeezing the other inputs
-        width = self.status.width() if self.status.width() > 50 else 400
-        self.status.setMinimumHeight(self.status.heightForWidth(width) if self.status.text() else 0)
+        width = label.width() if label.width() > 50 else 400
+        label.setMinimumHeight(label.heightForWidth(width) if label.text() else 0)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._fit_status()
+        self._fit_label(self.status)
