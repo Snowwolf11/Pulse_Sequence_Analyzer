@@ -192,7 +192,7 @@ psa/
 │   ├── app_backend.py       # GUI-independent analysis functions
 │   ├── rotations.py         # vectorized NumPy rotation backend
 │   ├── createCurve.py, ...  # curve, stability and quality-image calculations
-│   ├── design/              # editor back end: pulse <-> curve, metrics, families, builder, solver
+│   ├── design/              # editor back end: pulse <-> curve, metrics, families, builder, solver, GRAPE
 │   ├── editor_gui/          # editor front end (PySide6 + pyqtgraph)
 │   └── tests/               # regression, physics, editor back-end and GUI tests
 ├── pyproject.toml
@@ -343,6 +343,7 @@ left and a live panel on the right; its **Help** button explains everything in d
 | Curve families | Pick a family (helix, Lissajous knot, torus knot, Clelia curve, custom formula, 2H, 4H) and change its parameters live. |
 | Curve builder | Compose the error curve from lines, arcs, helices and Bézier segments with a twist (phase jump) at each junction; edit in 3D and in three projections. |
 | Import curve | Load curve points (x, y, z) or a curvature/torsion table from a CSV / text file. |
+| Optimize (GRAPE) | Optimize every sub-pulse of a start pulse with exact gradients: local robustness (detuning orders and B1 at chosen offsets, as in SCQC) or classical broadband GRAPE, with a UR or PP gate goal. |
 
 The panel shows the gate (rotation angle and axis), the robustness against detuning to first, second and
 third order (end point, area and third-order term of the error curve), the first-order robustness against
@@ -354,6 +355,15 @@ shape files and can be sent directly to the analyzer.
 are met: cancel the detuning error to 1st, 2nd and/or 3rd order, B1 robustness, and optionally a target
 gate (angle about an axis). It runs in the background and can be stopped at any time (the best result so
 far is kept). Evaluation limit, tolerances and goal weights are set in Settings → Solver.
+
+**GRAPE.** The Optimize (GRAPE) tab changes every sub-pulse (Cartesian controls) instead of a few
+parameters. Robustness is either *local* (cancel the detuning error terms of chosen orders, and optionally
+the first-order B1 error, around a list of offsets) or *broadband* (the gate on an offset × B1 grid). The
+gate goal is none, UR (rotation) or PP (point to point); the 100 % amplitude limit is always kept.
+Against spiky results: a smoothness weight, soft limits of the amplitude and phase rates, or smooth spline
+controls (optional; every sub-pulse stays the default). For exploration, several starts run in parallel
+and the best result is kept. "Stay close to start" regularization is optional. It uses the same solver
+settings.
 
 Conventions: on resonance, unit-speed error curve whose length is the pulse duration, curvature = Rabi
 frequency, torsion = phase change rate. Curves are converted into pulses exactly (the pulse reproduces the

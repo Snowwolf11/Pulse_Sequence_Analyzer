@@ -39,7 +39,7 @@ def _g_coeff(n):
 
 
 def fg_derivatives(x, order):
-    """F, G and their x-derivatives up to ``order`` (<= 3) at x >= 0; arrays of shape (order+1, ...)."""
+    """F, G and their x-derivatives up to ``order`` (<= 4) at x >= 0; arrays of shape (order+1, ...)."""
     x = np.asarray(x, dtype=np.float64)
     small = x < _SERIES_X
     F = np.empty((order + 1,) + x.shape)
@@ -51,8 +51,9 @@ def fg_derivatives(x, order):
     if np.any(big):
         r = np.sqrt(x[big]); s = np.sin(r / 2); c = np.cos(r / 2)
         g = [s / r, (c * r - 2 * s) / (4 * r ** 3), (-6 * c * r - r ** 2 * s + 12 * s) / (16 * r ** 5),
-             (-c * r ** 3 + 60 * c * r + 12 * r ** 2 * s - 120 * s) / (64 * r ** 7)]
-        f = [c] + [-gk / 4 for gk in g[:3]]                     # F^(k+1) = -G^(k) / 4
+             (-c * r ** 3 + 60 * c * r + 12 * r ** 2 * s - 120 * s) / (64 * r ** 7),
+             (20 * c * r ** 3 - 840 * c * r + r ** 4 * s - 180 * r ** 2 * s + 1680 * s) / (256 * r ** 9)]
+        f = [c] + [-gk / 4 for gk in g[:4]]                     # F^(k+1) = -G^(k) / 4
         for k in range(order + 1):
             F[k, big] = f[k]
             G[k, big] = g[k]
@@ -133,3 +134,77 @@ def magnus_vectors(X):
 def quaternion_of(U):
     """(w, x, y, z) of U = w I - i (x sx + y sy + z sz)."""
     return np.array([U[0, 0].real, -U[1, 0].imag, U[1, 0].real, -U[0, 0].imag])
+
+
+# --------------------------------------------- derivatives with respect to controls ---
+
+def _pmul(a, b, K):
+    """Product of polynomials in (delta, eta), truncated at delta^K and eta^1; arrays (K+1, 2, ...)."""
+    out = np.zeros(np.broadcast_shapes(a.shape, b.shape), dtype=np.result_type(a, b))
+    for k1 in range(K + 1):
+        for j1 in range(2):
+            for k2 in range(K + 1 - k1):
+                for j2 in range(2 - j1):
+                    out[k1 + k2, j1 + j2] += a[k1, j1] * b[k2, j2]
+    return out
+
+
+def step_jets_with_derivative(v0, d, e, f=None, order=3):
+    """Jets of exp(-i w . sigma / 2) with w = v0 + delta d + eta e + delta eta f (all (N, 3)):
+    returns (J, dJ), both (N, order+1, 2, 2): the delta-Taylor coefficients at eta = 0 and their
+    derivative with respect to eta (e.g. a control direction)."""
+    K = order
+    v0 = np.asarray(v0, dtype=np.float64).reshape(-1, 3)
+    N = len(v0)
+    d = np.broadcast_to(np.asarray(d, dtype=np.float64), (N, 3))
+    e = np.broadcast_to(np.asarray(e, dtype=np.float64), (N, 3))
+    f = np.zeros((N, 3)) if f is None else np.broadcast_to(np.asarray(f, dtype=np.float64), (N, 3))
+    W = np.zeros((K + 1, 2, N, 3))                   # w as polynomial
+    W[0, 0] = v0
+    if K >= 1:
+        W[1, 0] = d
+        W[1, 1] = f
+    W[0, 1] = e
+    dot = lambda a, b: np.einsum("...i,...i->...", a, b)
+    X = np.zeros((K + 1, 2, N))                      # x = w . w (without the constant)
+    if K >= 1:
+        X[1, 0] = 2 * dot(v0, d)
+        X[1, 1] = 2 * (dot(d, e) + dot(v0, f))
+    if K >= 2:
+        X[2, 0] = dot(d, d)
+        X[2, 1] = 2 * dot(d, f)
+    X[0, 1] = 2 * dot(v0, e)
+    F, G = fg_derivatives(dot(v0, v0), K + 1)
+    Fp = np.zeros((K + 1, 2, N)); Gp = np.zeros((K + 1, 2, N))
+    power = np.zeros((K + 1, 2, N)); power[0, 0] = 1.0
+    for j in range(K + 2):
+        Fp += F[j] / math.factorial(j) * power
+        Gp += G[j] / math.factorial(j) * power
+        power = _pmul(power, X, K)
+    V = _pmul(Gp[..., None], W, K)                   # (K+1, 2, N, 3)
+    eye = np.eye(2)
+    def mats(j):
+        m = (Fp[:, j, :, None, None] * eye - 1j * (V[:, j, :, 0, None, None] * SX + V[:, j, :, 1, None, None] * SY
+                                                     + V[:, j, :, 2, None, None] * SZ))
+        return np.moveaxis(m, 0, 1)                  # (N, K+1, 2, 2)
+    return mats(0), mats(1)
+
+
+def prefix_products(J):
+    """P[k] = J[k] o ... o J[0] for jets (N, K, 2, 2) (Hillis-Steele scan, log2 N vectorized steps)."""
+    P = J.copy()
+    s = 1
+    while s < len(P):
+        P[s:] = compose(P[s:], P[:-s])
+        s *= 2
+    return P
+
+
+def suffix_products(J):
+    """S[k] = J[N-1] o ... o J[k] for jets (N, K, 2, 2)."""
+    S = J.copy()
+    s = 1
+    while s < len(S):
+        S[:-s] = compose(S[s:], S[:-s])
+        s *= 2
+    return S

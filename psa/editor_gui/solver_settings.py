@@ -25,7 +25,7 @@ class SolverSettingsWidget(QWidget):
         self.settings = settings
         layout = QVBoxLayout(self)
         intro = QLabel("These settings are used by the solver in the pulse sequence editor (Waveform, "
-                       "Curve families and Curve builder tabs). Goals and free variables are chosen in the tabs.")
+                       "Curve families, Curve builder and Optimize (GRAPE) tabs). Goals and free variables are chosen in the tabs.")
         intro.setWordWrap(True); intro.setStyleSheet(f"color: {MUTED_FG};")
         layout.addWidget(intro)
 

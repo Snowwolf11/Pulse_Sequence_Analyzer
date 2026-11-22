@@ -549,6 +549,95 @@ def test_open_editor_from_main_window():
     ed.close(); main.close()
 
 
+def test_grape_tab_optimizes_robust_inversion():
+    """GRAPE tab: rectangular start, local first-order robustness + 180°x gate, runs in a process."""
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    tab.source_box.setCurrentText("rectangular")
+    tab.dur_spin.setValue(150.0); tab.amp_spin.setValue(100.0); tab.phase_spin.setValue(0.0)
+    tab.load_button.click(); process(20)
+    assert tab.start_pulse.N == 300 and w.panel.pulse is tab.start_pulse
+    cfg = tab.config()
+    assert cfg.mode == "local" and cfg.orders == [1] and cfg.gate == "UR" and cfg.offsets_hz == [0.0]
+    tab.solve_button.click()
+    assert tab.solving and not tab.gate_box.isEnabled()
+    wait_until(lambda: not tab.solving, 120)
+    assert tab.status.text().startswith("all goals reached"), tab.status.text()
+    out = tab.current_pulse()
+    assert metrics.robustness(out)["A1_norm"] < 1e-8 and np.max(out.amplitude) <= 100 + 1e-9
+    assert abs(metrics.gate(out)["angle_deg"] - 180) < 1e-4
+    wait_panel(w)
+    assert w.panel.pulse is out and tab.gate_box.isEnabled() and tab.solve_button.text() == "Optimize"
+    tab.edit_button.click(); process(20)                         # hand over to the waveform tab
+    assert w.current_tab() is w.waveform_tab and w.waveform_tab.current_pulse().N == out.N
+    w.close()
+
+
+def test_grape_tab_inputs_start_sources_and_stop():
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    # start from another tab
+    w.text_tab.editor.setPlainText("R(50, 0, 0.5); R(50, 90, 0.5); R(50, 180, 0.5);"); w.text_tab.parse()
+    tab.source_box.setCurrentText("Text tab"); tab.load_button.click(); process(20)
+    assert tab.start_pulse.N == 3 and np.allclose(tab.start_pulse.phase, [0, 90, 180])
+    # invalid inputs give readable errors instead of starting
+    tab.offsets_edit.setText("1, x"); tab.solve_button.click()
+    assert not tab.solving and "offsets" in tab.status.text()
+    tab.offsets_edit.setText("-2, 2")
+    tab.bb_radio.setChecked(True); tab.gate_box.setCurrentIndex(0); tab.solve_button.click()
+    assert not tab.solving and "gate" in tab.status.text()
+    # broadband PP config from the widgets
+    tab.gate_box.setCurrentIndex(2)
+    assert tab.pp_widget.isVisibleTo(tab) and not tab.ur_widget.isVisibleTo(tab)
+    tab.bb_spins["scale"][0].setValue(0.9); tab.bb_spins["scale"][1].setValue(1.1); tab.bb_spins["scale"][2].setValue(3)
+    tab.reg_box.setCurrentIndex(1); tab.reg_weight.setText("0.01")
+    cfg = tab.config()
+    assert cfg.mode == "broadband" and cfg.gate == "PP" and len(cfg.ensemble()) == 33
+    assert cfg.regularization == "stay_close" and cfg.regularization_weight == 0.01
+    # long random start: Stop returns the best pulse so far, the GUI stays usable
+    tab.source_box.setCurrentText("random"); tab.dur_spin.setValue(400.0); tab.load_button.click(); process(20)
+    w.solver_settings.stop_when_solved = False
+    tab.solve_button.click()
+    wait_until(lambda: tab._history or not tab.solving, 60)
+    tab.solve_button.click()                                    # Stop
+    wait_until(lambda: not tab.solving, 30)
+    assert tab.status.text().startswith(("stopped", "all goals", "converged")), tab.status.text()
+    assert tab.result is not None and tab.result.N == 800 and np.max(tab.result.amplitude) <= 100 + 1e-9
+    before = tab.result
+    tab.restart_button.click()
+    assert tab.start_pulse.N == 800 and np.allclose(tab.start_pulse.amplitude, before.amplitude) and tab.result is None
+    w.close()
+
+
+def test_grape_tab_multistart_spline_and_limits():
+    """K starts run in parallel processes (one residual line each); the best result is kept."""
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    tab.source_box.setCurrentText("rectangular"); tab.dur_spin.setValue(150.0); tab.load_button.click(); process(20)
+    tab.spline_radio.setChecked(True); tab.spline_spin.setValue(400)
+    tab.solve_button.click()
+    assert not tab.solving and "control points" in tab.status.text()             # more points than sub-pulses
+    tab.spline_spin.setValue(16)
+    tab.smooth_edit.setText("1e-5"); tab.amp_rate_spin.setValue(30); tab.phase_rate_spin.setValue(20)
+    tab.starts_spin.setValue(3)
+    cfg = tab.config()
+    assert (cfg.controls, cfg.n_spline, cfg.smooth_weight, cfg.max_amp_rate, cfg.max_phase_rate_khz, cfg.n_starts) == \
+        ("spline", 16, 1e-5, 30.0, 20.0, 3)
+    tab.solve_button.click()
+    assert tab.solving and not tab.spline_spin.isEnabled()
+    wait_until(lambda: not tab.solving, 180)
+    text = tab.status.text()
+    assert text.startswith("all goals reached") and "best of 3 starts" in text, text
+    assert len(tab.conv_curves) == 3 and len(tab.last_infos) == 3
+    out = tab.current_pulse()
+    assert metrics.robustness(out)["A1_norm"] < 1e-8 and abs(metrics.gate(out)["angle_deg"] - 180) < 1e-4
+    assert tab.spline_spin.isEnabled()
+    w.close()
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     failed = 0

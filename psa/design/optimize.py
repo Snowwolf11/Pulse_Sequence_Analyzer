@@ -70,7 +70,10 @@ def rotation_from_axis_angle(axis, angle_deg):
 
 
 def rotation_angle_deg(R):
-    return math.degrees(math.acos(min(1.0, max(-1.0, (np.trace(R) - 1) / 2))))
+    """Rotation angle of R; atan2 of the skew and trace parts is accurate also for tiny angles (arccos of
+    the trace alone loses half of the digits there)."""
+    w = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]]) / 2
+    return math.degrees(math.atan2(float(np.linalg.norm(w)), (float(np.trace(R)) - 1) / 2))
 
 
 @dataclass

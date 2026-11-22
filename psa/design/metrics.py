@@ -40,9 +40,8 @@ def _gate_from_U(U):
     q = q / np.linalg.norm(q)
     if q[0] < 0:
         q = -q
-    w = min(1.0, max(-1.0, float(q[0])))
-    angle = 2 * math.degrees(math.acos(w))
     s = np.linalg.norm(q[1:])
+    angle = 2 * math.degrees(math.atan2(s, float(q[0])))          # accurate also for tiny angles
     axis = q[1:] / s if s > 1e-12 else np.array([0.0, 0.0, 1.0])
     return {"axis": axis, "angle_deg": angle, "matrix": quaternion_to_matrix(q), "quaternion": q}
 

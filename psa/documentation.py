@@ -76,7 +76,7 @@ Tips
 EDITOR_DOCUMENTATION_STR = """Pulse Sequence Editor
 
 Overview
-The editor creates pulse sequences in several ways (tabs on the left) and evaluates them live
+The editor creates and optimizes pulse sequences in several ways (tabs on the left) and evaluates them live
 (panel on the right). All tabs produce the same thing: N sub-pulses of equal duration with an amplitude
 (% of the maximum amplitude) and a phase (degrees). Everything is on resonance; the detuning noise acts
 along z. The error curve is unit speed: its length equals the pulse duration, its curvature is the Rabi
@@ -153,6 +153,40 @@ The solver stops (keeping the best result) when
 Solver settings ("Settings…" in the solver box, or Menu → Settings → Solver in the analyzer): these
 stopping rules, the finite-difference step, the "solved" thresholds and a weight per goal (relative
 importance in the least-squares residual).
+
+Optimize (GRAPE) tab
+Optimizes every sub-pulse individually (Cartesian controls u_x, u_y per sub-pulse) with exact gradients,
+like classical GRAPE. The duration and the number of sub-pulses stay those of the start pulse.
+- Start pulse: the current pulse of another tab, a rectangular pulse (duration, amplitude, phase) or a
+  random one (duration, seed); "Load start pulse". "Result → start" continues from the result.
+- Robustness, one of
+  • local (SCQC): cancel the detuning error terms A1/A2/A3 (orders ticked) and optionally the first-order
+    B1 error, expanded around every offset of the list (kHz, comma-separated, e.g. "-3, 0, 3"; the gate
+    goal is then required at every listed offset as well),
+  • broadband (classical GRAPE): the gate goal on a grid of offsets × B1 scalings (mean infidelity).
+- Gate goal: none, UR (rotation angle about an axis; the whole rotation) or PP (point to point: initial
+  magnetization m0 to a target). For PP the robustness terms only count the error that moves m0.
+- The amplitude limit (100 %) is always kept exactly (built into the parametrization).
+- Controls: "every sub-pulse" (classical) or "smooth spline" with M control points per channel (cubic
+  B-splines: smooth by construction, few variables, often much faster; needs M ≤ number of sub-pulses).
+- Smoothness weight (0 = off; try 1e-4): prefers smooth u_x, u_y (no spikes). It is soft: the optimizer
+  first solves with it, then lowers it step by step (×0.1) until the goals are reached exactly, so the
+  result stays close to the smooth solution.
+- Max. amplitude rate (%/µs) and max. phase rate (kHz = torsion of the error curve / 2π): soft limits that
+  cost nothing below the limit (kept to about 1 %). The phase rate counts in proportion to the amplitude
+  (a phase jump where the amplitude is ~0 is harmless). Too strict limits make the goals unreachable.
+- Regularization "stay close to start": adds λ·|u − u_start|² (also lowered step by step).
+- Starts / spread (exploration): several optimizations from perturbed starts run in parallel processes
+  (one residual line each); the result is the best one: goals reached first, then the smoothest (if a
+  smoothness weight is set) or the lowest residual. Spread 0.5 is a large perturbation, 0.05 a small one.
+- Start noise: a tiny random change of the first start (seeded). An exactly symmetric start, e.g. a
+  constant phase, can otherwise keep the optimizer in a symmetric family of pulses that cannot reach the goal.
+The optimizer (Levenberg–Marquardt with exact Jacobians) runs in the background (Optimize / Stop); the plots
+show the start (dashed), the best pulse so far and the goal residual vs. evaluations. Stopping rules (the
+evaluation limit counts per start), "solved" thresholds and goal weights are the shared solver settings
+("Settings…"; the finite-difference step is not used: the gradients are exact).
+If all starts converge to about the same residual without reaching the goals, the pulse is most likely too
+short for them (or the limits too strict): try a longer start pulse.
 """
 
 # the main window's documentation includes the editor description

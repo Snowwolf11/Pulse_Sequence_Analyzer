@@ -15,6 +15,7 @@ from psa.editor_gui.tab_waveform import WaveformTab
 from psa.editor_gui.tab_families import FamiliesTab
 from psa.editor_gui.tab_builder import BuilderTab
 from psa.editor_gui.tab_import import ImportTab
+from psa.editor_gui.tab_grape import GrapeTab
 
 
 class FitScrollArea(QScrollArea):
@@ -58,10 +59,11 @@ class PulseEditorWindow(QMainWindow):
         self.families_tab = FamiliesTab(dt, umax)
         self.builder_tab = BuilderTab(dt, umax)
         self.import_tab = ImportTab(dt, umax)
+        self.grape_tab = GrapeTab(dt, umax)
         self._tab_list = []                      # inner tab widgets, in tab order
         for tab, title in ((self.text_tab, "Text"), (self.waveform_tab, "Waveform"),
                            (self.families_tab, "Curve families"), (self.builder_tab, "Curve builder"),
-                           (self.import_tab, "Import curve")):
+                           (self.import_tab, "Import curve"), (self.grape_tab, "Optimize (GRAPE)")):
             self._tab_list.append(tab)
             self.tabs.addTab(scrollable(tab), title)
 
@@ -86,6 +88,10 @@ class PulseEditorWindow(QMainWindow):
             if hasattr(tab, "solver_box"):
                 tab.solver_box.settings_provider = lambda: self.solver_settings
                 tab.solver_box.settingsRequested.connect(self.open_solver_settings)
+        self.grape_tab.settings_provider = lambda: self.solver_settings
+        self.grape_tab.settingsRequested.connect(self.open_solver_settings)
+        self.grape_tab.requestStart.connect(self._grape_start)
+        self.grape_tab.editInWaveform.connect(self._edit_in_waveform)
         self.waveform_tab.requestTextPulse.connect(self._waveform_from_text)
         self.families_tab.editInWaveform.connect(self._edit_in_waveform)
         self.builder_tab.editInWaveform.connect(self._edit_in_waveform)
@@ -132,6 +138,7 @@ class PulseEditorWindow(QMainWindow):
         for tab in self.all_tabs():
             if hasattr(tab, "solver_box"):
                 tab.solver_box.stop(wait=True)
+        self.grape_tab.stop(wait=True)
         super().closeEvent(event)
 
     def all_tabs(self):
@@ -173,6 +180,15 @@ class PulseEditorWindow(QMainWindow):
         ps = self.text_tab.current_pulse()
         if ps is not None:
             self.waveform_tab.load_pulse(ps)
+
+    def _grape_start(self, source):
+        tabs = {"Text tab": self.text_tab, "Waveform tab": self.waveform_tab, "Curve families tab": self.families_tab,
+                "Curve builder tab": self.builder_tab, "Import curve tab": self.import_tab}
+        ps = tabs[source].current_pulse() if source in tabs else None
+        if ps is None:
+            self.grape_tab.start_failed(f"the {source} has no valid pulse (or its live calculation is off)")
+        else:
+            self.grape_tab.set_start(ps)
 
     def _edit_in_waveform(self, ps):
         self.waveform_tab.load_pulse(ps)
