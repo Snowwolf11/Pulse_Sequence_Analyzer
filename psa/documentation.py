@@ -183,6 +183,11 @@ like classical GRAPE. The duration and the number of sub-pulses stay those of th
 - Max. amplitude rate (%/µs) and max. phase rate (kHz = torsion of the error curve / 2π): soft limits that
   cost nothing below the limit (kept to about 1 %). The phase rate counts in proportion to the amplitude
   (a phase jump where the amplitude is ~0 is harmless). Too strict limits make the goals unreachable.
+- "Limits only in a last stage" (recommended, on by default): the optimization first runs without the rate
+  limits, then a last stage switches them on. Limits from the start can block the way to good solutions,
+  which often pass through rough intermediate pulses (example: broadband 180°x ±10 kHz, 450 µs reached a
+  worst infidelity of 3e-4 with late limits of 20 %/µs and 50 kHz, but got stuck at 0.67 with the same limits
+  from the start). A strong smoothness weight can block the way in the same manner.
 - Regularization "stay close to start": adds λ·|u − u_start|² (also lowered step by step).
 - Exploration preset: exploit (one start, refined to the end: fastest, finds the nearest solution),
   balanced (8 smooth perturbations, screening 8 → 4 → 2, then 4 kicks) or explore (24 starts, half of

@@ -74,6 +74,7 @@ class GrapeConfig:
     max_amp_rate: float = 0.0                    # soft limit of |d amplitude / dt| in %/µs (0 = off)
     max_phase_rate_khz: float = 0.0              # soft limit of |d phase / dt| / 2pi in kHz (0 = off)
     limit_weight: float = 1.0                    # weight of the rate-limit rows
+    limits_late: bool = False                    # rate limits only in a last stage (after the free optimization)
     n_starts: int = 1                            # multi-start: number of starts
     multistart_noise: float = 0.5                # perturbation of starts 2, 3, ... (in the squashed variables)
     start_pool: str = "perturb"                  # starts 2, 3, ...: "perturb" the start pulse, "random" pulses, "mix"
@@ -290,6 +291,11 @@ def stage_plan(cfg, N):
     plan = [("spline", m, soft[0], "coarse") for m in levels] + [(cfg.controls, int(cfg.n_spline), f, "main") for f in soft]
     if cfg.n_points() > 1:
         plan += [(cfg.controls, int(cfg.n_spline), soft[-1], "reweight")] * int(cfg.reweight_rounds)
+    if cfg.limits_late and (cfg.max_amp_rate > 0 or cfg.max_phase_rate_khz > 0):
+        # limits switched on late: the free optimization first (limits from the start can block the way to
+        # good solutions, which often pass through rough intermediate pulses), then a stage with the limits
+        i = next(k for k, st in enumerate(plan) if st[3] == "reweight") if plan[-1][3] == "reweight" else len(plan)
+        plan.insert(i, (cfg.controls, int(cfg.n_spline), soft[-1], "limits"))
     return plan
 
 
@@ -329,6 +335,7 @@ class GrapeProblem:
         self.m0, self.mt = _unit(config.m0), _unit(config.m_target)
         self.Rt = rotation_from_axis_angle(config.target_axis, config.target_angle_deg) if config.gate == "UR" else None
         self.soft_scale = 1.0
+        self.limit_scale = 1.0               # 0 switches the rate limits off (stages before "limits")
         self.point_weights = None            # Lawson weights of the points (offsets / grid points), None = all 1
         self.point_errors = None             # unweighted goal residual of every point (set by goals)
         D = sparse.diags([-np.ones(self.N - 1), np.ones(self.N - 1)], [0, 1], shape=(self.N - 1, self.N))
@@ -509,7 +516,7 @@ class GrapeProblem:
             x1, y1, x2, y2, a1, a2 = ux[:-1], uy[:-1], ux[1:], uy[1:], a[:-1], a[1:]
             i = np.arange(N - 1)
             cols = [i, i + N, i + 1, i + 1 + N]                         # x1, y1, x2, y2
-            w = cfg.limit_weight
+            w = cfg.limit_weight * self.limit_scale
             if cfg.max_amp_rate > 0:
                 X = cfg.max_amp_rate
                 k = 100 / (self.dt * 1e6)
@@ -602,13 +609,14 @@ def lm_step(G, rg, S, rs, mu):
     return b / mu - G.T @ np.linalg.solve(K, G @ b) / mu
 
 
-def levenberg_marquardt(fun, p, max_nfev, xtol, ftol, gtol):
+def levenberg_marquardt(fun, p, max_nfev, xtol, ftol, gtol, lam_box=None):
     """Minimize |r(p)|^2 with r, Jacobians from fun(p) -> (rg, G dense, rs, S sparse). Every call of fun is
-    one evaluation (residuals and exact Jacobian together). Returns (p, status message)."""
+    one evaluation (residuals and exact Jacobian together). ``lam_box`` ([damping] or [None]) carries the
+    damping in and out, so that a resumed run continues with it. Returns (p, status message)."""
     rg, G, rs, S = fun(p)
     cost = rg @ rg + rs @ rs
     scale = (np.sum(G * G) + (S.multiply(S).sum() if S is not None else 0.0)) / max(len(p), 1)
-    lam = 1e-2
+    lam = lam_box[0] if lam_box is not None and lam_box[0] is not None else 1e-2
     nfev = 1
     while nfev < max_nfev:
         grad = G.T @ rg + (S.T @ rs if S is not None and S.shape[0] else 0.0)
@@ -626,10 +634,14 @@ def levenberg_marquardt(fun, p, max_nfev, xtol, ftol, gtol):
             p, rg, G, rs, S, cost = p + d, rg2, G2, rs2, S2, cost2
             scale = (np.sum(G * G) + (S.multiply(S).sum() if S is not None else 0.0)) / max(len(p), 1)
             lam = max(lam / 3.0, 1e-15)
+            if lam_box is not None:
+                lam_box[0] = lam
             if small_step or small_gain:
                 return p, "step / improvement tolerance reached"
         else:
             lam *= 4.0
+            if lam_box is not None:
+                lam_box[0] = lam
             if lam > 1e16:
                 return p, "no further improvement possible"
     return p, "evaluation limit reached"
@@ -655,7 +667,7 @@ STOP_MESSAGES = {"solved": "all goals reached", "limit": "evaluation limit reach
 
 
 def optimize(ps: PulseSequence, config: GrapeConfig, settings: SolverSettings = None, callback=None,
-             snapshot=None, snapshot_interval_s=1.0, start_index=0, state=None, budget=None):
+             snapshot=None, snapshot_interval_s=1.0, start_index=0, state=None, budget=None, start_summary=True):
     """Run the optimization from the start pulse ``ps`` (start ``start_index`` of a multi-start: other
     seed and, for index > 0, the spread or a random start). ``callback(nfev, goal_residual)`` returning True
     stops it; ``snapshot(pulse, goal_residual)`` receives the best pulse every ``snapshot_interval_s``.
@@ -683,6 +695,7 @@ def optimize(ps: PulseSequence, config: GrapeConfig, settings: SolverSettings = 
     t0 = time.time()
     last_snap = [t0]
     weights = None
+    lam_box = [None]                                     # LM damping of the current stage (kept when resumed)
     minimax = {"worst": np.inf, "w": None, "weights": None}
     if state is None:
         s, used, nfev0 = 0, 0, 0
@@ -693,10 +706,13 @@ def optimize(ps: PulseSequence, config: GrapeConfig, settings: SolverSettings = 
              else problem(s).params(np.asarray(state["w"], float)))
         if state.get("weights") is not None:
             weights = np.asarray(state["weights"], float)
+        lam_box[0] = state.get("lam")
     count = {"nfev": nfev0, "history": []}
     limit = st.max_nfev if budget is None else min(st.max_nfev, nfev0 + max(1, int(budget)))
     tols = [t if t and t > 0 else 0.0 for t in (st.xtol, st.ftol, st.gtol)]
-    n_pre = sum(1 for stage in plan if stage[3] != "reweight") - 1          # stages before the last main stage
+    n_pre = sum(1 for stage in plan if stage[3] in ("coarse", "main")) - 1      # stages before the last main stage
+    plan_kinds = [stage[3] for stage in plan]
+    late_limits = "limits" in plan_kinds
     share = max(10, st.max_nfev // (2 * max(n_pre, 1)))
     reason, message, cost = "converged", "", float("nan")
 
@@ -704,6 +720,7 @@ def optimize(ps: PulseSequence, config: GrapeConfig, settings: SolverSettings = 
         nonlocal s, p, used, weights
         w = problem(s).wvec(p)
         s, used = s + 1, 0
+        lam_box[0] = None
         p = problem(s).params(w)
         if plan[s][3] == "reweight":                     # Lawson: weights grow with the errors of the points
             nxt = problem(s)
@@ -721,8 +738,12 @@ def optimize(ps: PulseSequence, config: GrapeConfig, settings: SolverSettings = 
         prob.point_weights = weights
         final = s == len(plan) - 1
         kind = plan[s][3]
-        last_main = kind == "main" and not final and plan[s + 1][3] == "reweight"
-        if final or last_main:          # the main stage runs as without reweighting; the rounds share the rest
+        last_main = kind == "main" and not final and plan[s + 1][3] != "main"
+        prob.limit_scale = 0.0 if late_limits and plan_kinds.index("limits") > s else 1.0
+        if last_main and plan[s + 1][3] == "limits":      # leave half of the rest for the stage with the limits
+            stage_left = (st.max_nfev - count["nfev"] + used) // 2 - used
+        elif final or last_main or (kind == "limits" and plan[s + 1][3] == "reweight"):
+            # the main stage runs as without reweighting; the rounds share the rest
             stage_left = st.max_nfev - count["nfev"]
         elif kind == "reweight":
             stage_left = max(10, (st.max_nfev - count["nfev"] + used) // (len(plan) - s)) - used
@@ -765,11 +786,11 @@ def optimize(ps: PulseSequence, config: GrapeConfig, settings: SolverSettings = 
                 snapshot(prob.pulse(prob.to_controls(best["p"])[0]), best["goal"])
             return rg, G, rs, (S if S is not None else sparse.csr_matrix((0, len(q))))
 
-        stage_tols = tols if final or last_main or kind == "reweight" else [max(t, SOFT_STAGE_TOL) for t in tols]
+        stage_tols = tols if final or last_main or kind in ("reweight", "limits") else [max(t, SOFT_STAGE_TOL) for t in tols]
         n_before = count["nfev"]
         stopped = None
         try:
-            _, message = levenberg_marquardt(fun, p, min(stage_left, call_left), *stage_tols)
+            _, message = levenberg_marquardt(fun, p, min(stage_left, call_left), *stage_tols, lam_box=lam_box)
         except _Stop as e:
             stopped = e.reason
         used += count["nfev"] - n_before
@@ -801,7 +822,7 @@ def optimize(ps: PulseSequence, config: GrapeConfig, settings: SolverSettings = 
     prob.soft_scale, prob.point_weights = plan[-1][2], None
     _, _, summ, goal = prob.evaluate(u)
     errors = prob.point_errors
-    start = prob.evaluate(prob.x0)[2]
+    start = prob.evaluate(prob.x0)[2] if start_summary else {}
     prob.soft_scale = plan[s][2]
     return prob.pulse(u), {"stop_reason": reason, "message": message, "reached": prob.reached(summ),
                            "values": summ, "start_summary": start, "nfev": count["nfev"], "goal_residual": goal,
@@ -809,10 +830,32 @@ def optimize(ps: PulseSequence, config: GrapeConfig, settings: SolverSettings = 
                            "history": count["history"], "start_index": start_index, "cancelled": reason == "user",
                            "finished": reason != "paused", "stage": s, "n_stages": len(plan),
                            "state": {"stage": s, "p": p.tolist(), "stage_nfev": used, "nfev": count["nfev"],
-                                     "weights": None if weights is None else weights.tolist()},
+                                     "weights": None if weights is None else weights.tolist(), "lam": lam_box[0]},
                            "point_weights": None if weights is None else weights.tolist(),
                            "point_errors": None if errors is None else errors.tolist(),
                            "w": prob.wvec(p).tolist()}
+
+
+def band_infidelity(ps: PulseSequence, config: GrapeConfig, offsets_hz, scale=1.0):
+    """Infidelity of the pulse at every offset of a (fine) test grid, without gradients: UR 1 - (3 + tr(Rt^T R)) / 6,
+    PP 1 - (1 + (R m0) . m_target) / 2 (the same measures as the broadband goal)."""
+    from psa.rotations import propagate_batch, quaternion_to_matrix
+    R = quaternion_to_matrix(propagate_batch(ps.as_array(), ps.dt, ps.umax * scale, np.asarray(offsets_hz, float)))
+    if config.gate == "PP":
+        m0, mt = _unit(config.m0), _unit(config.m_target)
+        return 1 - (1 + (R @ m0) @ mt) / 2
+    Rt = rotation_from_axis_angle(config.target_axis, config.target_angle_deg)
+    return 1 - (3 + np.einsum("ij,kij->k", Rt, R)) / 6
+
+
+def band_quality(ps: PulseSequence, config: GrapeConfig, lo_hz, hi_hz, n=401, thresholds=(1e-3, 1e-4, 1e-5)):
+    """Worst and mean infidelity over [lo, hi] on n test points (not the optimization points: shows dips
+    between them), and the fraction of the band below each threshold."""
+    inf = np.maximum(band_infidelity(ps, config, np.linspace(lo_hz, hi_hz, int(n))), 0.0)
+    out = {"worst infidelity": float(np.max(inf)), "mean infidelity": float(np.mean(inf))}
+    for t in thresholds:
+        out[f"fraction below {t:g}"] = float(np.mean(inf <= t))
+    return out
 
 
 def selection_key(config: GrapeConfig, info):

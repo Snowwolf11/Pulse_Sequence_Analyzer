@@ -261,6 +261,12 @@ class GrapeTab(QWidget):
                                         "weighted by the amplitude: phase jumps at zero amplitude are free; off = 0")
         cf.addRow("max. amplitude rate:", self.amp_rate_spin)
         cf.addRow("max. phase rate:", self.phase_rate_spin)
+        self.limits_late_check = QCheckBox("limits only in a last stage (recommended)")
+        self.limits_late_check.setChecked(True)
+        self.limits_late_check.setToolTip("optimize freely first, then switch the rate limits on: limits from the start "
+                                          "can block the way to good solutions (which often pass through rough "
+                                          "intermediate pulses); the result keeps the limits either way")
+        cf.addRow("", self.limits_late_check)
         reg = QHBoxLayout()
         self.reg_box = QComboBox(); self.reg_box.addItems(["none", "stay close to start"])
         self.reg_weight = QLineEdit("1e-3"); self.reg_weight.setToolTip("weight λ of λ·|u − u_start|²")
@@ -448,7 +454,8 @@ class GrapeTab(QWidget):
             n_spline=self.spline_spin.value(), smooth_weight=smooth, max_amp_rate=self.amp_rate_spin.value(),
             max_phase_rate_khz=self.phase_rate_spin.value(), n_starts=self.starts_spin.value(),
             multistart_noise=self.spread_spin.value(), reweight_rounds=self.reweight_spin.value(),
-            reweight_power=self.reweight_power_spin.value(), **self._exploration_fields())
+            reweight_power=self.reweight_power_spin.value(), limits_late=self.limits_late_check.isChecked(),
+            **self._exploration_fields())
         if cfg.controls == "spline" and self.start_pulse is not None and cfg.n_spline > self.start_pulse.N:
             raise ValueError(f"more spline control points ({cfg.n_spline}) than sub-pulses ({self.start_pulse.N})")
         cfg.check()
@@ -544,7 +551,7 @@ class GrapeTab(QWidget):
                 self.bb_radio, self.local_widget, self.bb_widget, self.gate_box, self.ur_widget, self.pp_widget,
                 self.reg_box, self.reg_weight, self.noise_spin, self.full_radio, self.spline_radio, self.spline_spin,
                 self.smooth_edit, self.amp_rate_spin, self.phase_rate_spin, self.starts_spin, self.spread_spin,
-                self.preset_box, self.reweight_spin, self.reweight_power_spin] + self.gen_widgets + self.explore_dialog.widgets
+                self.preset_box, self.reweight_spin, self.reweight_power_spin, self.limits_late_check] + self.gen_widgets + self.explore_dialog.widgets
 
     def _set_inputs_enabled(self, on):
         for w in self._inputs():

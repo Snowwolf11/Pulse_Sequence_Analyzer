@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 from psa.design import metrics
 from psa.design.grape import (GrapeConfig, GrapeProblem, Search, control_noise, exploration_preset, optimize,
                                optimize_multistart, propagator_and_gradient, rotation_with_gradient, run_task, search,
-                               spline_basis, stage_plan, lawson_update)
+                               spline_basis, stage_plan, lawson_update, band_infidelity,
+                               band_quality)
 from psa.design.optimize import SolverSettings
 from psa.design.pulse import PulseSequence
 from psa.rotations import propagate_batch, quaternion_to_matrix
@@ -291,6 +292,31 @@ def test_lawson_reweighting():
     _, even = optimize(rectangular(100, 0, 30), loc.replace(reweight_rounds=5), st)
     assert plain["stop_reason"] == "converged" and even["nfev"] > plain["nfev"] and len(even["point_weights"]) == 2
     assert max(even["point_errors"]) <= max(plain["point_errors"]) * (1 + 1e-9)
+
+def test_band_quality_matches_broadband_goal():
+    """The test-grid scorer (no gradients) gives the same infidelities as the broadband goal at its points."""
+    ps = random_pulse(50, seed=4)
+    for cfg in (GrapeConfig(mode="broadband", gate="UR", target_axis=[0, 1, 1], target_angle_deg=120, bb_offset_n=5),
+                GrapeConfig(mode="broadband", gate="PP", m0=[0, 0, 1], m_target=[0, 1, 0], bb_offset_n=5)):
+        summ = GrapeProblem(ps, cfg).goals(GrapeProblem(ps, cfg).x0)[2]
+        inf = band_infidelity(ps, cfg, np.linspace(cfg.bb_offset_min_hz, cfg.bb_offset_max_hz, 5))
+        assert abs(np.max(inf) - summ["max infidelity"]) < 1e-12 and abs(np.mean(inf) - summ["mean infidelity"]) < 1e-12
+    q = band_quality(ps, cfg, -5000, 5000, n=101)
+    assert q["worst infidelity"] >= q["mean infidelity"] and 0 <= q["fraction below 0.001"] <= 1
+
+
+def test_limits_late():
+    """Rate limits in a last stage only: the plan gets a "limits" stage (before the reweight rounds); the result
+    keeps the limits and reaches the goals."""
+    cfg = robust_inversion(max_amp_rate=5, max_phase_rate_khz=20, limits_late=True)
+    assert [k for *_, k in stage_plan(cfg, 300)] == ["main", "limits"]
+    two = cfg.replace(offsets_hz=[-1e3, 1e3], reweight_rounds=2)
+    assert [k for *_, k in stage_plan(two, 300)] == ["main", "limits", "reweight", "reweight"]
+    start = random_pulse(300, seed=2)
+    out, info = optimize(start, cfg, SolverSettings(max_nfev=1500))
+    assert info["reached"] and info["stage"] == 1, info["message"]
+    assert info["values"]["rate-limit excess"] < 1e-3 and metrics.robustness(out)["A1_norm"] < 1e-8
+
 
 def test_config_validation():
     for bad in (GrapeConfig(mode="broadband", gate="none"), GrapeConfig(mode="local", orders=[], gate="none"),
