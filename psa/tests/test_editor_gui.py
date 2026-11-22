@@ -132,6 +132,25 @@ def test_mouse_drag_double_click_and_delete():
     w.close()
 
 
+def test_waveform_axis_ranges():
+    w = make_window()
+    w.show_tab(w.waveform_tab)
+    tab = w.waveform_tab
+    tab.duration_spin.setValue(0.2); tab._duration_edited()
+    tab.set_ranges(time=(20, 80), amplitude=(10, 60), phase=(-90, 270))
+    (x0, x1), (a0, a1) = tab.plots["amplitude"].getPlotItem().vb.viewRange()
+    (px0, px1), (p0, p1) = tab.plots["phase"].getPlotItem().vb.viewRange()
+    assert np.allclose([x0, x1], [20, 80], atol=1e-6) and np.allclose([px0, px1], [20, 80], atol=1e-6)   # time shared
+    assert np.allclose([a0, a1], [10, 60], atol=1e-6) and np.allclose([p0, p1], [-90, 270], atol=1e-6)
+    # zooming the view (as with the trackpad) updates the fields
+    tab.plots["phase"].getPlotItem().vb.setYRange(0, 720, padding=0); process(20)
+    assert abs(tab.range_spins["phase"][1].value() - 720) < 1e-6
+    tab.auto_range()
+    (x0, x1), _ = tab.plots["amplitude"].getPlotItem().vb.viewRange()
+    assert x0 <= 0 and x1 >= 200
+    w.close()
+
+
 def test_waveform_import_from_text_and_metadata_change():
     w = make_window()
     w.text_tab.set_text("R(80, 0, 20); PR(100, 0, 270, 30); R(50, 180, 10);")
@@ -241,6 +260,134 @@ def test_families_live_switch():
     wait_panel(w)
     assert w.panel.pulse is tab.pulse
     tab.live_check.setChecked(True)
+    w.close()
+
+
+def test_builder_tab():
+    from psa.design.builder import Segment
+    w = make_window()
+    tab = w.builder_tab
+    w.show_tab(tab)
+    tab._timer.stop(); ps = tab.recompute()
+    assert ps is not None and ps.N > 0
+    wait_panel(w)
+    assert w.panel.pulse is ps
+    # add segments through the buttons and edit parameters through the editor widgets
+    n0 = len(tab.design.segments)
+    tab.add_segment("helix"); tab.add_segment("line"); tab.add_segment("bezier")
+    assert len(tab.design.segments) == n0 + 3 and tab.seg_list.count() == n0 + 3
+    tab.seg_list.setCurrentRow(0)
+    spin, free = tab.editors["angle"]
+    spin.setValue(250.0)
+    assert tab.design.segments[0].params["angle"] == 250.0
+    tab.remove_segment(); assert len(tab.design.segments) == n0 + 2
+    tab.move_segment(1)
+    # solver through the GUI: three arcs, twists and angles free -> closed curve
+    rmin = tab.design.r_min_us
+    tab.design.segments = [Segment("arc", {"radius": 1.3 * rmin, "angle": 90}),
+                           Segment("arc", {"radius": 1.3 * rmin, "angle": 200}, twist=150, free=["angle", "twist"]),
+                           Segment("arc", {"radius": 1.3 * rmin, "angle": 120}, twist=150, free=["angle", "twist"])]
+    tab._refresh_list(select=0)
+    tab.solve_button.click()                                                # runs in the background
+    assert tab.solving and tab.solve_button.text() == "Stop" and tab.solve_button.isEnabled()
+    assert not tab.seg_list.isEnabled()                                     # editing locked while solving
+    wait_until(lambda: not tab.solving, 60)
+    assert tab.solve_label.text().startswith("solved"), tab.solve_label.text()
+    assert tab.seg_list.isEnabled() and tab.solve_button.text() == "Solve"
+    assert "1.0e-0" not in tab.solve_label.text()
+    tab._timer.stop(); tab.recompute()
+    assert tab.design.robustness()["A1_norm"] < 1e-9                         # exact closure of the design
+    assert np.linalg.norm(tab.points[-1]) < 1e-4 * tab.design.duration()    # drawn curve (0.25 µs chords)
+    # design round trip
+    d = tab.design.to_dict()
+    tab.load_design(d)
+    assert tab.design.robustness()["A1_norm"] < 1e-9
+    w.close()
+
+
+def wait_until(cond, timeout_s):
+    import time
+    t0 = time.time()
+    while not cond():
+        process(20)
+        assert time.time() - t0 < timeout_s, "timeout"
+
+
+def test_builder_solver_stop_keeps_gui_responsive():
+    """The solver runs in a separate process: the GUI keeps running and Stop ends it with a result."""
+    import time
+    from psa.design.builder import Segment
+    w = make_window()
+    tab = w.builder_tab
+    w.show_tab(tab)
+    rmin = tab.design.r_min_us
+    tab.design.segments = [Segment("arc", {"radius": 1.3 * rmin, "angle": 100 + 37 * k}, twist=60 * k,
+                                   free=(["angle", "twist", "radius"] if k else [])) for k in range(7)]
+    tab._refresh_list(select=0)
+    for k in (1, 2, 3):
+        tab.order_checks[k].setChecked(True)
+    t0, ticks = time.time(), 0
+    while time.time() - t0 < 1.0:                                          # idle event-loop rate for comparison
+        process(10); ticks += 1
+    idle = ticks / (time.time() - t0)
+    tab.solve_button.click()
+    assert tab.solving
+    t0, ticks = time.time(), 0
+    while time.time() - t0 < 1.5 and tab.solving:                          # GUI event loop keeps running
+        process(10); ticks += 1
+    rate = ticks / (time.time() - t0)
+    assert rate > 0.5 * idle, (rate, idle)
+    if tab.solving:
+        tab.solve_button.click()                                            # Stop
+        wait_until(lambda: not tab.solving, 30)
+    text = tab.solve_label.text()
+    assert text.startswith(("stopped", "solved", "not fully")), text
+    assert tab.seg_list.isEnabled() and tab.solve_button.text() == "Solve"
+    w.close()
+
+
+def test_builder_bezier_drag():
+    from psa.design.builder import Segment
+    w = make_window()
+    tab = w.builder_tab
+    w.show_tab(tab)
+    tab.design.segments = [Segment("arc", {"radius": 25, "angle": 60}),
+                           Segment("bezier", {"p1": 10, "p2x": 8, "p2y": 2, "p2z": 20, "p3x": 20, "p3y": -4, "p3z": 30})]
+    tab._refresh_list(select=1); tab._timer.stop(); tab.recompute(); process(30)
+    handles = tab._control_points() * 1e6
+    plot = tab.proj_plots["xy"]
+    plot.getPlotItem().vb.autoRange(); process(30)
+    before = dict(tab.design.segments[1].params)
+    start = view_to_widget(plot, handles[2, 0], handles[2, 1])                 # P3 in the xy projection
+    end = view_to_widget(plot, handles[2, 0] + 5.0, handles[2, 1] - 3.0)
+    drag(plot, start, end)
+    after = tab.design.segments[1].params
+    moved = tab._control_points()[2] * 1e6
+    assert abs(moved[0] - (handles[2, 0] + 5.0)) < 0.6 and abs(moved[1] - (handles[2, 1] - 3.0)) < 0.6, (moved, handles[2])
+    assert abs(moved[2] - handles[2, 2]) < 1e-6                                # z unchanged in the xy projection
+    assert after["p2x"] == before["p2x"] and after["p1"] == before["p1"]       # other points untouched
+    w.close()
+
+
+def test_import_tab():
+    from psa.design.families import family_by_name
+    from psa.design.conversion import curve_to_ps
+    w = make_window()
+    tab = w.import_tab
+    w.show_tab(tab)
+    pts = family_by_name("Torus knot").points({})
+    path = os.path.join(tempfile.mkdtemp(), "knot.csv")
+    np.savetxt(path, pts, delimiter=",", header="x,y,z")
+    tab.path_edit.setText(path); tab.format_box.setCurrentIndex(0)
+    ps = tab.load()
+    ref, _ = curve_to_ps(pts, 0.5e-6, 1e4)
+    assert ps is not None and np.allclose(ps.amplitude, ref.amplitude) and np.allclose(ps.phase, ref.phase)
+    wait_panel(w)
+    assert w.panel.pulse is ps
+    tab.dur_fixed.setChecked(True); tab.dur_spin.setValue(2.0)
+    assert abs(tab.convert().duration - 2e-3) < 1e-12
+    tab.path_edit.setText(path + ".missing")
+    assert tab.load() is None and "could not read" in tab.error.text()
     w.close()
 
 

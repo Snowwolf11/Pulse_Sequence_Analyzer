@@ -154,7 +154,9 @@ class SummaryPanel(QWidget):
             self.status.setText("calculation failed:\n" + traceback.format_exc(limit=2))
             return
         self.labels["info"].setText(f"{ps.N} sub-pulses, {ps.duration * 1e6:.2f} µs")
-        self.labels["amp"].setText(f"{np.max(ps.amplitude):.2f} % = {np.max(ps.amplitude) * ps.umax / 1e5:.3f} kHz")
+        peak = float(np.max(ps.amplitude))
+        self.labels["amp"].setText(f"{peak:.2f} % = {peak * ps.umax / 1e5:.3f} kHz" + ("  (above the maximum!)" if peak > 100 + 1e-6 else ""))
+        self.labels["amp"].setStyleSheet(f"color: {BAD};" if peak > 100 + 1e-6 else "")
         self.labels["gate"].setText(f"{g['angle_deg']:.4f}°")
         self.labels["axis"].setText(fmt_vec(g["axis"], 4))
         for k in ("A1", "A2", "A3"):

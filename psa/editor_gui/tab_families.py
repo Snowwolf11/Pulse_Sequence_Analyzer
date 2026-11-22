@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBo
 
 from psa.design.conversion import curve_to_ps, ps_to_curve
 from psa.design.families import FAMILIES, CustomCurve, family_by_name
-from psa.editor_gui.widgets import ACCENT, BAD, MUTED_FG, Mpl3D, make_plot
+from psa.editor_gui.widgets import ACCENT, BAD, MUTED_FG, Mpl3D, lock_heights, make_plot
 
 SLIDER_STEPS = 1000
 
@@ -186,6 +186,7 @@ class FamiliesTab(QWidget):
             c.changed.connect(self.schedule)
             self.param_form.addRow(p.label + ":", c)
             self.controls[p.name] = c
+        lock_heights(self.param_group)
         self.expr_group.setVisible(isinstance(fam, CustomCurve))
         self.dur_group.setVisible(fam.kind == "curve")
         self.schedule()

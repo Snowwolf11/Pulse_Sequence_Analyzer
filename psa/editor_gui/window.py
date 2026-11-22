@@ -8,9 +8,12 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QMainWindow, QScrollArea, QSplitter, QTabWidget, QWidget
 
 from psa.editor_gui.panel import SummaryPanel
+from psa.editor_gui.widgets import lock_heights
 from psa.editor_gui.tab_text import TextTab
 from psa.editor_gui.tab_waveform import WaveformTab
 from psa.editor_gui.tab_families import FamiliesTab
+from psa.editor_gui.tab_builder import BuilderTab
+from psa.editor_gui.tab_import import ImportTab
 
 
 def scrollable(widget):
@@ -39,9 +42,12 @@ class PulseEditorWindow(QMainWindow):
         self.text_tab = TextTab(dt, umax)
         self.waveform_tab = WaveformTab(dt, umax)
         self.families_tab = FamiliesTab(dt, umax)
+        self.builder_tab = BuilderTab(dt, umax)
+        self.import_tab = ImportTab(dt, umax)
         self._tab_list = []                      # inner tab widgets, in tab order
         for tab, title in ((self.text_tab, "Text"), (self.waveform_tab, "Waveform"),
-                           (self.families_tab, "Curve families")):
+                           (self.families_tab, "Curve families"), (self.builder_tab, "Curve builder"),
+                           (self.import_tab, "Import curve")):
             self._tab_list.append(tab)
             self.tabs.addTab(scrollable(tab), title)
 
@@ -53,12 +59,15 @@ class PulseEditorWindow(QMainWindow):
         central = QWidget()
         QHBoxLayout(central).addWidget(splitter)
         self.setCentralWidget(central)
+        lock_heights(self)
         self._fit_to_screen()
 
         for tab in self.all_tabs():
             tab.pulseChanged.connect(lambda ps, t=tab: self._pulse_changed(t, ps))
         self.waveform_tab.requestTextPulse.connect(self._waveform_from_text)
         self.families_tab.editInWaveform.connect(self._edit_in_waveform)
+        self.builder_tab.editInWaveform.connect(self._edit_in_waveform)
+        self.import_tab.editInWaveform.connect(self._edit_in_waveform)
         self.tabs.currentChanged.connect(self._tab_switched)
         self.panel.metadataChanged.connect(self._metadata_changed)
         self.panel.sendRequested.connect(self._send_to_main)
@@ -72,6 +81,10 @@ class PulseEditorWindow(QMainWindow):
             return
         avail = screen.availableGeometry()
         self.resize(min(1500, int(avail.width() * 0.95)), min(950, int(avail.height() * 0.92)))
+
+    def closeEvent(self, event):
+        self.builder_tab.stop_solver(wait=True)
+        super().closeEvent(event)
 
     def all_tabs(self):
         return list(self._tab_list)

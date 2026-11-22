@@ -127,3 +127,12 @@ class Mpl3D(QWidget):
         ax.set_zlabel(f"z [{unit}]", fontsize=8)
         ax.set_title(title, color=TEXT_FG, fontsize=9)
         self.canvas.draw_idle()
+
+
+def lock_heights(root):
+    """Give every button / input below ``root`` its natural height as minimum, so tight layouts scroll
+    instead of squeezing widgets (which cuts their text)."""
+    from PySide6.QtWidgets import (QAbstractSpinBox, QCheckBox, QComboBox, QLineEdit, QPushButton, QRadioButton)
+    for cls in (QPushButton, QAbstractSpinBox, QComboBox, QLineEdit, QCheckBox, QRadioButton):
+        for w in root.findChildren(cls):
+            w.setMinimumHeight(w.sizeHint().height())

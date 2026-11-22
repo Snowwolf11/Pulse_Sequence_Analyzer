@@ -1,8 +1,7 @@
-from .GUI import main as tkinter_main
-
-
 def main(gui="tkinter"):
+    # GUIs are imported lazily, so importing psa (e.g. psa.design in a solver process) stays light
     if gui == "tkinter":
+        from .GUI import main as tkinter_main
         return tkinter_main()
 
     if gui == "dash":

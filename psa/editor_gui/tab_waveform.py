@@ -10,7 +10,7 @@ import json
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QPushButton, QVBoxLayout, QWidget)
 
 from psa.design.pulse import PulseSequence
@@ -74,6 +74,24 @@ class WaveformTab(QWidget):
         sl.addStretch()
         layout.addWidget(sel)
 
+        # ---- axis ranges (also follow trackpad / mouse zooming)
+        axes = QGroupBox("Axis ranges")
+        axes.setToolTip("Tip: scrolling with the pointer over an axis zooms only that axis.")
+        ag = QGridLayout(axes)
+        self.range_spins = {}
+        for row, (key, label, unit) in enumerate((("time", "time (both plots)", " µs"), ("amplitude", "amplitude", " %"),
+                                                  ("phase", "phase", " °"))):
+            lo, hi = QDoubleSpinBox(), QDoubleSpinBox()
+            for sp in (lo, hi):
+                sp.setRange(-1e9, 1e9); sp.setDecimals(3); sp.setSuffix(unit); sp.setKeyboardTracking(False)
+                sp.valueChanged.connect(lambda v, k=key: self._range_edited(k))
+            ag.addWidget(QLabel(label + ":"), row, 0); ag.addWidget(lo, row, 1)
+            ag.addWidget(QLabel("to"), row, 2); ag.addWidget(hi, row, 3)
+            self.range_spins[key] = (lo, hi)
+        b_auto = QPushButton("Auto (fit all)"); b_auto.clicked.connect(self.auto_range)
+        ag.addWidget(b_auto, 0, 4, 3, 1)
+        layout.addWidget(axes)
+
         hint = QLabel("drag keyframes · double-click to add · right-click to delete · keyframes snap to sub-pulse starts")
         hint.setStyleSheet(f"color: {MUTED_FG};")
         layout.addWidget(hint)
@@ -95,7 +113,10 @@ class WaveformTab(QWidget):
             layout.addWidget(p, stretch=1)
         self.plots["phase"].setXLink(self.plots["amplitude"])
         self.plots["amplitude"].setYRange(0, 105)
+        for name, p in self.plots.items():
+            p.getPlotItem().vb.sigRangeChanged.connect(lambda *a: self._sync_range_spins())
         self.refresh(emit=False)
+        self._sync_range_spins()
 
     # ------------------------------------------------------------- helpers ---
     def channel(self, name):
@@ -128,6 +149,43 @@ class WaveformTab(QWidget):
         self.duration_spin.setValue(self.model.duration * 1e3)
         self.selection = None
         self.refresh()
+
+    # ---------------------------------------------------------- axis ranges ---
+    def _view(self, key):
+        return self.plots["amplitude" if key == "time" else key].getPlotItem().vb
+
+    def _sync_range_spins(self):
+        """Show the current view ranges in the fields (without triggering their handlers)."""
+        (x0, x1), (a0, a1) = self._view("amplitude").viewRange()
+        _, (p0, p1) = self._view("phase").viewRange()
+        for key, (lo_v, hi_v) in (("time", (x0, x1)), ("amplitude", (a0, a1)), ("phase", (p0, p1))):
+            lo, hi = self.range_spins[key]
+            for sp, v in ((lo, lo_v), (hi, hi_v)):
+                if not sp.hasFocus():
+                    sp.blockSignals(True); sp.setValue(v); sp.blockSignals(False)
+
+    def _range_edited(self, key):
+        lo, hi = (sp.value() for sp in self.range_spins[key])
+        if hi <= lo:
+            return
+        vb = self._view(key)
+        if key == "time":
+            vb.setXRange(lo, hi, padding=0)
+        else:
+            vb.setYRange(lo, hi, padding=0)
+
+    def set_ranges(self, time=None, amplitude=None, phase=None):
+        """Set axis ranges programmatically (each a (min, max) tuple or None)."""
+        for key, rng in (("time", time), ("amplitude", amplitude), ("phase", phase)):
+            if rng is not None:
+                lo, hi = self.range_spins[key]
+                lo.setValue(rng[0]); hi.setValue(rng[1])
+                self._range_edited(key)
+
+    def auto_range(self):
+        for p in self.plots.values():
+            p.getPlotItem().vb.autoRange()
+        self._sync_range_spins()
 
     # --------------------------------------------------------- interaction ---
     def _dragged(self, name, pos, x, y):
