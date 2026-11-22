@@ -1,0 +1,260 @@
+"""Parametrized curve and pulse families for the editor.
+
+Curve families return points of a curve (any units); the editor converts them with
+``conversion.curve_to_ps``. Pulse families (2H, 4H) return the pulse sequence directly from the
+closed-form construction (phase ramps), so no conversion is needed.
+"""
+from __future__ import annotations
+
+import ast
+import math
+from dataclasses import dataclass
+from typing import Dict, List
+
+import numpy as np
+from scipy.optimize import brentq
+
+from psa.design.pulse import PulseSequence
+
+
+@dataclass
+class Param:
+    name: str
+    label: str
+    default: float
+    minimum: float
+    maximum: float
+    integer: bool = False
+    unit: str = ""
+
+
+class Family:
+    name = ""
+    description = ""
+    kind = "curve"                      # "curve" or "pulse"
+    params: List[Param] = []
+
+    def defaults(self) -> Dict[str, float]:
+        return {p.name: p.default for p in self.params}
+
+    def check(self, values):
+        out = self.defaults()
+        out.update(values or {})
+        for p in self.params:
+            v = min(p.maximum, max(p.minimum, float(out[p.name])))
+            out[p.name] = int(round(v)) if p.integer else v
+        return out
+
+    def points(self, values, n=4000) -> np.ndarray:
+        raise NotImplementedError
+
+    def pulse(self, values, dt, umax) -> PulseSequence:
+        raise NotImplementedError
+
+
+# ---------------------------------------------------------- curve families ---
+
+class Helix(Family):
+    name = "Helix"
+    description = "x = R cos(2πu), y = R sin(2πu), z = h·u,  u ∈ [0, turns].  Constant curvature and torsion."
+    params = [Param("R", "radius R", 1.0, 0.05, 10.0), Param("h", "pitch h (per turn)", 1.0, -20.0, 20.0),
+              Param("turns", "turns", 2.0, 0.05, 50.0)]
+
+    def points(self, values, n=4000):
+        v = self.check(values)
+        u = np.linspace(0, v["turns"], n)
+        return np.c_[v["R"] * np.cos(2 * np.pi * u), v["R"] * np.sin(2 * np.pi * u), v["h"] * u]
+
+
+class LissajousKnot(Family):
+    name = "Lissajous knot"
+    description = ("x = cos(nx·t + φx), y = cos(ny·t + φy), z = cos(nz·t + φz),  t ∈ [0, 2π].  "
+                   "Closed for integer frequencies; a knot if nx, ny, nz are pairwise coprime.")
+    params = [Param("nx", "nx", 3, 1, 20, True), Param("ny", "ny", 2, 1, 20, True), Param("nz", "nz", 7, 1, 20, True),
+              Param("phx", "φx", 0.7, -math.pi, math.pi, unit="rad"), Param("phy", "φy", 0.2, -math.pi, math.pi, unit="rad"),
+              Param("phz", "φz", 0.0, -math.pi, math.pi, unit="rad")]
+
+    def points(self, values, n=6000):
+        v = self.check(values)
+        t = np.linspace(0, 2 * np.pi, n)
+        return np.c_[np.cos(v["nx"] * t + v["phx"]), np.cos(v["ny"] * t + v["phy"]), np.cos(v["nz"] * t + v["phz"])]
+
+
+class TorusKnot(Family):
+    name = "Torus knot"
+    description = ("(p, q) torus knot: x = (R + r cos qt) cos pt, y = (R + r cos qt) sin pt, z = r sin qt,  "
+                   "t ∈ [0, 2π].  A knot if p and q are coprime.")
+    params = [Param("p", "p", 2, 1, 20, True), Param("q", "q", 3, 1, 20, True),
+              Param("R", "torus radius R", 2.0, 0.1, 10.0), Param("r", "tube radius r", 0.8, 0.01, 10.0)]
+
+    def points(self, values, n=6000):
+        v = self.check(values)
+        t = np.linspace(0, 2 * np.pi, n)
+        rad = v["R"] + v["r"] * np.cos(v["q"] * t)
+        return np.c_[rad * np.cos(v["p"] * t), rad * np.sin(v["p"] * t), v["r"] * np.sin(v["q"] * t)]
+
+
+class CleliaCurve(Family):
+    name = "Clelia curve"
+    description = "Curve on the unit sphere: x = sin(n t) cos(m t), y = sin(n t) sin(m t), z = cos(n t),  t ∈ [0, T]."
+    params = [Param("m", "m", 7.0, 0.1, 30.0), Param("n", "n", 3.342, 0.1, 30.0), Param("T", "T", 8.0, 0.1, 50.0)]
+
+    def points(self, values, n=6000):
+        v = self.check(values)
+        t = np.linspace(0, v["T"], n)
+        return np.c_[np.sin(v["n"] * t) * np.cos(v["m"] * t), np.sin(v["n"] * t) * np.sin(v["m"] * t), np.cos(v["n"] * t)]
+
+
+# ----------------------------------------------------------- custom family ---
+
+SAFE_FUNCTIONS = {name: getattr(np, name) for name in
+                  ("sin", "cos", "tan", "arcsin", "arccos", "arctan", "arctan2", "sinh", "cosh", "tanh",
+                   "exp", "log", "log10", "sqrt", "abs", "sign", "floor", "ceil", "minimum", "maximum")}
+SAFE_FUNCTIONS.update({"asin": np.arcsin, "acos": np.arccos, "atan": np.arctan, "atan2": np.arctan2})
+SAFE_CONSTANTS = {"pi": np.pi, "e": np.e}
+_ALLOWED_NODES = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Call, ast.Name, ast.Load, ast.Constant,
+                  ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.USub, ast.UAdd, ast.FloorDiv)
+
+
+def compile_expression(text, variables):
+    """Compile a formula like ``a*cos(u) + u**2`` that may only use + - * / ** %, numbers, the
+    functions in SAFE_FUNCTIONS, pi, e and the given variable names. Raises ValueError otherwise."""
+    text = text.strip().replace("^", "**")
+    if not text:
+        raise ValueError("empty expression")
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError as e:
+        raise ValueError(f"syntax error in '{text}': {e.msg}") from None
+    allowed_names = set(SAFE_FUNCTIONS) | set(SAFE_CONSTANTS) | set(variables)
+    called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in SAFE_FUNCTIONS and id(node) not in called and node.id not in variables:
+            raise ValueError(f"function '{node.id}' must be called, e.g. {node.id}(u)")
+        if not isinstance(node, _ALLOWED_NODES):
+            raise ValueError(f"'{type(node).__name__}' is not allowed in '{text}'")
+        if isinstance(node, ast.Name) and node.id not in allowed_names:
+            raise ValueError(f"unknown name '{node.id}' in '{text}'")
+        if isinstance(node, ast.Call) and not (isinstance(node.func, ast.Name) and node.func.id in SAFE_FUNCTIONS):
+            raise ValueError(f"only the functions {sorted(SAFE_FUNCTIONS)} may be called")
+        if isinstance(node, ast.Constant) and not isinstance(node.value, (int, float)):
+            raise ValueError(f"only numbers are allowed as constants in '{text}'")
+    code = compile(tree, "<expression>", "eval")
+
+    def evaluate(**values):
+        env = {"__builtins__": {}}
+        env.update(SAFE_FUNCTIONS); env.update(SAFE_CONSTANTS); env.update(values)
+        return eval(code, env)
+    return evaluate
+
+
+class CustomCurve(Family):
+    name = "Custom (formula)"
+    description = ("Type x(u), y(u), z(u) with parameters a, b, c, d. Allowed: + - * / ** (or ^), numbers, pi, e, "
+                   "sin cos tan asin acos atan atan2 sinh cosh tanh exp log log10 sqrt abs sign minimum maximum.")
+    params = [Param("u0", "u start", 0.0, -1000.0, 1000.0), Param("u1", "u end", 2 * math.pi, -1000.0, 1000.0),
+              Param("a", "a", 1.0, -20.0, 20.0), Param("b", "b", 2.0, -20.0, 20.0),
+              Param("c", "c", 3.0, -20.0, 20.0), Param("d", "d", 0.5, -20.0, 20.0)]
+    default_expressions = ("cos(a*u)", "sin(b*u)", "d*sin(c*u)")
+
+    def points(self, values, n=4000, expressions=None):
+        v = self.check(values)
+        exprs = expressions or self.default_expressions
+        u = np.linspace(v["u0"], v["u1"], n)
+        cols = []
+        for e in exprs:
+            val = compile_expression(e, ("u", "a", "b", "c", "d"))(u=u, a=v["a"], b=v["b"], c=v["c"], d=v["d"])
+            val = np.broadcast_to(np.asarray(val, dtype=np.float64), u.shape)
+            if not np.all(np.isfinite(val)):
+                raise ValueError(f"'{e}' gives non-finite values on [u start, u end]")
+            cols.append(val)
+        return np.column_stack(cols)
+
+
+# ----------------------------------------------------------- pulse families ---
+
+def phase_ramp(phase_start_deg, rate_deg_per_s, n, dt):
+    """Phases of a linear ramp sampled at the sub-pulse midpoints."""
+    return phase_start_deg + rate_deg_per_s * dt * (np.arange(n) + 0.5)
+
+
+class TwoHelix(Family):
+    name = "2H (closed two-helix loop)"
+    kind = "pulse"
+    description = ("Two phase ramps of duration τ at full amplitude whose error curve closes (first-order robust). "
+                   "Closed form: T from Ω τ = T / sqrt(1 − sin T / T), T ∈ (π, 2π); ν = sqrt(−sin T / T); "
+                   "ramp rate −Ω ν; phase jump Δφ(T) between the ramps.  τ ∈ (π/Ω, 2π/Ω).")
+    params = [Param("tau", "ramp duration τ", 75.0, 50.5, 99.5, unit="µs (at 10 kHz)"),
+              Param("phi0", "start phase φ0", 0.0, -180.0, 180.0, unit="°")]
+
+    @staticmethod
+    def parameters(Omega, tau):
+        """Closed-form 2H parameters (Omega in rad/s, tau in s): ramp rate (deg/s), phase jump (deg), T."""
+        f = lambda T: T / math.sqrt(1 - math.sin(T) / T) - Omega * tau
+        T = brentq(f, math.pi + 1e-12, 2 * math.pi - 1e-12)
+        nu = math.sqrt(-math.sin(T) / T)
+        jump = math.degrees(math.atan2(-2 * nu * math.sqrt(1 + nu ** 2) * math.sin(T), -(1 + (1 + 2 * nu ** 2) * math.cos(T))))
+        rate = math.degrees(-Omega * nu)
+        return rate, jump, T
+
+    def pulse(self, values, dt, umax):
+        v = self.check(values)
+        Omega = 2 * math.pi * umax
+        tau_lo, tau_hi = math.pi / Omega, 2 * math.pi / Omega
+        n = max(1, int(round(v["tau"] * 1e-6 / dt)))
+        tau = min(max(n * dt, tau_lo * (1 + 1e-6)), tau_hi * (1 - 1e-6))
+        rate, jump, _ = self.parameters(Omega, tau)
+        ph1 = phase_ramp(v["phi0"], rate, n, tau / n)
+        ph2 = phase_ramp(v["phi0"] + rate * tau + jump, rate, n, tau / n)
+        return PulseSequence(np.full(2 * n, 100.0), np.r_[ph1, ph2], dt, umax)
+
+    def tau_range_us(self, umax):
+        return 0.5e6 / umax, 1e6 / umax
+
+
+class FourHelix(Family):
+    name = "4H (0° UR, 2nd-order robust)"
+    kind = "pulse"
+    description = ("Four phase ramps PR(φ0 → φ0+φ̇τ), PR(φ0+φ̇τ → φ0), and the same shifted by 180°; φ̇ is the first "
+                   "root of Ω² sin(τ√(Ω²+φ̇²)) + τ φ̇² √(Ω²+φ̇²) = 0 (curve closure). Identity gate, "
+                   "first- and second-order robust against detuning. Solutions exist for Ωτ ∈ (π, 2π) + 2πk, "
+                   "i.e. τ ∈ (50, 100) µs, (150, 200) µs, … at 10 kHz.")
+    params = [Param("tau", "ramp duration τ", 60.0, 50.5, 999.5, unit="µs"),
+              Param("phi0", "start phase φ0", 0.0, -180.0, 180.0, unit="°")]
+
+    @staticmethod
+    def phase_rate(Omega, tau):
+        """First positive root φ̇ (rad/s) of the closure condition."""
+        def f(p):
+            w = math.sqrt(Omega ** 2 + p ** 2)
+            return Omega ** 2 * math.sin(tau * w) + tau * p ** 2 * w
+        grid = np.linspace(0.0, 50 * Omega, 20001)[1:]
+        vals = np.array([f(p) for p in grid])
+        sign = np.flatnonzero(np.sign(vals[:-1]) != np.sign(vals[1:]))
+        if not len(sign):
+            k = Omega * tau / (2 * math.pi)
+            raise ValueError(f"no closing phase-ramp rate for τ = {tau * 1e6:.2f} µs (Ωτ/2π = {k:.3f}); "
+                             "4H solutions need Ωτ/2π in (k + 1/2, k + 1)")
+        i = sign[0]
+        return brentq(f, grid[i], grid[i + 1])
+
+    def pulse(self, values, dt, umax):
+        v = self.check(values)
+        Omega = 2 * math.pi * umax
+        n = max(1, int(round(v["tau"] * 1e-6 / dt)))
+        tau = n * dt
+        rate = math.degrees(self.phase_rate(Omega, tau))
+        p0 = v["phi0"]
+        ramps = [phase_ramp(p0, rate, n, dt), phase_ramp(p0 + rate * tau, -rate, n, dt),
+                 phase_ramp(p0 + 180, rate, n, dt), phase_ramp(p0 + 180 + rate * tau, -rate, n, dt)]
+        return PulseSequence(np.full(4 * n, 100.0), np.concatenate(ramps), dt, umax)
+
+
+FAMILIES = [Helix(), LissajousKnot(), TorusKnot(), CleliaCurve(), CustomCurve(), TwoHelix(), FourHelix()]
+
+
+def family_by_name(name) -> Family:
+    for f in FAMILIES:
+        if f.name == name:
+            return f
+    raise KeyError(name)

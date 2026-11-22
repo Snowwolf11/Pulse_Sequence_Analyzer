@@ -709,7 +709,17 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         SettingsDialog(self).exec()
 
     def open_editor(self):
-        EditPulseSequenceDialog(self).exec()
+        from psa.editor_gui.window import PulseEditorWindow
+        if getattr(self, "_editor_window", None) is None:
+            self._editor_window = PulseEditorWindow(
+                main_window=self,
+                dt=self.time_per_pulse_spin.value() * 1e-6,
+                umax=self.pulse_amplitude_spin.value() * 1e3,
+                save_path=os.path.join(DEFAULTS.export_directory, "Edited_Pulse_Sequence.csv"),
+            )
+        self._editor_window.show()
+        self._editor_window.raise_()
+        self._editor_window.activateWindow()
 
     def show_documentation(self):
         dialog = QDialog(self)
