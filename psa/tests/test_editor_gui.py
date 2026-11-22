@@ -294,14 +294,13 @@ def test_builder_tab():
     wait_until(lambda: not tab.solving, 60)
     assert tab.solve_label.text().startswith("solved"), tab.solve_label.text()
     assert tab.seg_list.isEnabled() and tab.solve_button.text() == "Solve"
-    assert "1.0e-0" not in tab.solve_label.text()
     tab._timer.stop(); tab.recompute()
-    assert tab.design.robustness()["A1_norm"] < 1e-9                         # exact closure of the design
+    assert tab.design.robustness()["A1_norm"] < 1e-8                         # closed (below the "solved" threshold)
     assert np.linalg.norm(tab.points[-1]) < 1e-4 * tab.design.duration()    # drawn curve (0.25 µs chords)
     # design round trip
     d = tab.design.to_dict()
     tab.load_design(d)
-    assert tab.design.robustness()["A1_norm"] < 1e-9
+    assert tab.design.robustness()["A1_norm"] < 1e-8
     w.close()
 
 
@@ -343,6 +342,64 @@ def test_builder_solver_stop_keeps_gui_responsive():
     text = tab.solve_label.text()
     assert text.startswith(("stopped", "solved", "not fully")), text
     assert tab.seg_list.isEnabled() and tab.solve_button.text() == "Solve"
+    w.close()
+
+
+def test_waveform_solver():
+    """Waveform tab: the solver adjusts keyframe values for a target gate; plots keep their size."""
+    from psa.design import metrics
+    w = make_window()
+    tab = w.waveform_tab
+    w.show_tab(tab)
+    tab.duration_spin.setValue(0.12); tab._duration_edited()            # 240 sub-pulses
+    for name, vals in (("amplitude", (80.0, 60.0, 50.0)), ("phase", (0.0, 60.0, 30.0))):
+        for idx, v in zip((0, 120, 239), vals):
+            tab.add_keyframe(name, idx, v, "hold")
+    keys = tab.solver_box.free_keys()
+    assert ("amplitude", 0) in keys and ("phase", 120) in keys
+    # do not let the solver change the last phase keyframe (one sub-pulse)
+    for i in range(tab.solver_box.var_list.count()):
+        it = tab.solver_box.var_list.item(i)
+        if it.data(Qt.ItemDataRole.UserRole) == ("phase", 239):
+            it.setCheckState(Qt.CheckState.Unchecked)
+    box = tab.solver_box
+    box.order_checks[1].setChecked(False)
+    box.target_check.setChecked(True); box.angle_spin.setValue(90.0)
+    for sp, v in zip(box.axis_spins, (0, 1, 0)):
+        sp.setValue(v)
+    box.button.click()
+    assert box.solving and not tab.duration_spin.isEnabled()
+    wait_until(lambda: not box.solving, 120)
+    assert box.status.text().startswith("solved"), box.status.text()
+    g = metrics.gate(tab.current_pulse())
+    assert abs(g["angle_deg"] - 90) < 1e-3 and np.allclose(g["axis"], [0, 1, 0], atol=1e-4)
+    assert tab.model.phase.keyframes[tab.model.phase.find(239)].value == 30.0
+    assert tab.duration_spin.isEnabled()
+    # the plots fill the visible area; the solver box lies below
+    area = w.tabs.currentWidget()
+    w.resize(1300, 800); process(50)
+    assert tab.plots["phase"].geometry().bottom() <= area.viewport().height() + 5
+    assert tab.solver_box.geometry().top() >= tab.plots["phase"].geometry().bottom()
+    w.close()
+
+
+def test_families_solver():
+    w = make_window()
+    tab = w.families_tab
+    w.show_tab(tab)
+    tab.family_box.setCurrentText("Custom (formula)")
+    tab.expr_edits[1].setText("sin(b*u) + a*u")
+    tab.controls["a"].set_value(0.3); tab.controls["b"].set_value(1.0)
+    tab._timer.stop(); tab.compute()
+    names = [tab.solver_box.var_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(tab.solver_box.var_list.count())]
+    assert names == ["u0", "u1", "a", "b", "c", "d"]
+    tab.solver_box._check_all(False)
+    tab.solver_box.var_list.item(2).setCheckState(Qt.CheckState.Checked)     # only "a"
+    duration = tab.pulse.duration
+    tab.solver_box.button.click()
+    wait_until(lambda: not tab.solver_box.solving, 120)
+    assert abs(tab.controls["a"].value()) < 1e-3, tab.solver_box.status.text()
+    assert abs(tab.pulse.duration - duration) < 1e-12                      # duration kept
     w.close()
 
 
@@ -412,6 +469,74 @@ def test_save_and_send_to_main_window():
         # the analyzer's curve equals the editor's curve
         assert np.allclose(main.latest_result.CM[-1], ps_to_curve(w.panel.pulse)[-1], atol=1e-12)
     w.close(); main.close()
+
+
+def test_help_window():
+    w = make_window()
+    w.help_button.click(); process(20)
+    from PySide6.QtWidgets import QTextEdit
+    assert w._help.isVisible() and "Curve builder tab" in w._help.findChild(QTextEdit).toPlainText()
+    from psa.documentation import DOCUMENTATION_STR
+    assert "Pulse Sequence Editor" in DOCUMENTATION_STR and "Solver" in DOCUMENTATION_STR
+    w.close()
+
+
+def test_solver_settings_shared_and_used():
+    """Settings → Solver of the analyzer edit the settings the editor's solver uses."""
+    from psa.GUI_pyside6 import PulseSequenceAnalyzerQt, SettingsDialog
+    from psa.design.builder import Segment
+    main = PulseSequenceAnalyzerQt()
+    main.open_editor(); process(50)
+    ed = main._editor_window
+    assert ed.solver_settings is main.solver_settings
+    dlg = SettingsDialog(main, initial_tab="Solver")
+    assert dlg.tabs.count() == 2 and dlg.tabs.currentWidget() is dlg.solver_widget
+    dlg.solver_widget.max_spin.setValue(10)
+    dlg.solver_widget.time_spin.setValue(120.0)
+    dlg.solver_widget.solved_check.setChecked(True)
+    dlg.solver_widget.weights["weight_order1"].setValue(3.0)
+    dlg.solver_widget.sci["solved_tolerance"].setText("1e-6")
+    dlg.save()
+    assert main.solver_settings.max_nfev == 10 and main.solver_settings.weight_order1 == 3.0
+    assert main.solver_settings.time_limit_s == 120.0 and main.solver_settings.stop_when_solved
+    assert main.solver_settings.solved_tolerance == 1e-6
+    # an invalid entry is refused and keeps the dialog on the solver tab
+    dlg2 = SettingsDialog(main)
+    dlg2.solver_widget.sci["xtol"].setText("abc")
+    dlg2.save()
+    assert dlg2.solver_widget.error.text() and main.solver_settings.xtol == 1e-12
+    # the job sent to the solver process carries the settings: 10 evaluations -> stops early
+    tab = ed.builder_tab
+    ed.show_tab(tab)
+    rmin = tab.design.r_min_us
+    tab.design.segments = [Segment("arc", {"radius": 1.3 * rmin, "angle": 100 + 37 * k}, twist=60 * k,
+                                   free=(["angle", "twist", "radius"] if k else [])) for k in range(7)]
+    tab._refresh_list(select=0)
+    for k in (1, 2, 3):
+        tab.order_checks[k].setChecked(True)
+    tab.solve_button.click()
+    wait_until(lambda: not tab.solving, 60)
+    import re
+    n = int(re.search(r"\((\d+) evaluations", tab.solve_label.text()).group(1))
+    assert n == 10 and tab.solve_label.text().startswith("evaluation limit reached"), tab.solve_label.text()
+    # Reset Analyzer resets the shared object in place
+    main.reset_to_defaults()
+    assert ed.solver_settings is main.solver_settings and main.solver_settings.max_nfev == 2000
+    ed.close(); main.close()
+
+
+def test_solver_settings_button_opens_dialog():
+    from PySide6.QtWidgets import QDialog
+    w = make_window()                                     # no analyzer: stand-alone dialog
+    opened = []
+    orig = QDialog.exec
+    QDialog.exec = lambda self: opened.append(type(self).__name__) or 0
+    try:
+        w.waveform_tab.solver_box.settings_button.click()
+    finally:
+        QDialog.exec = orig
+    assert opened == ["SolverSettingsDialog"]
+    w.close()
 
 
 def test_open_editor_from_main_window():

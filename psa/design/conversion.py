@@ -96,10 +96,12 @@ def _clean(points):
 class CurveSpline:
     """Cubic spline through curve points (chord-length parameter) with an arc-length table."""
 
-    def __init__(self, points, oversample=20):
+    def __init__(self, points, oversample=None, max_fine=20000):
         pts = _clean(points)
         u = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))]
         self.spline = CubicSpline(u, pts, axis=0, bc_type="not-a-knot" if len(pts) > 3 else "natural")
+        if oversample is None:          # dense input needs little oversampling: cap the table size
+            oversample = int(min(20, max(2, math.ceil(max_fine / max(1, len(pts) - 1)))))
         self.u_fine = np.linspace(0.0, u[-1], (len(pts) - 1) * oversample + 1)
         d1 = self.spline(self.u_fine, 1)
         speed = np.linalg.norm(d1, axis=1)
@@ -147,16 +149,19 @@ def curve_to_ps(points, dt=0.5e-6, umax=1e4, duration=None, phase_start=0.0, ali
     ``duration`` (s) defaults to the shortest multiple of ``dt`` allowed by ``umax`` and the maximal
     curvature. Returns (PulseSequence, info dict)."""
     pts = _clean(points)
+    spline = CurveSpline(pts)                      # one spline; alignment is a rigid motion applied afterwards
     if align:
-        pts, Q = align_curve(pts)
+        Q = rotation_to_z(spline.at_arclength(np.array([0.0]))[1][0])
     else:
         Q = np.eye(3)
-    spline = CurveSpline(pts)
+    origin = pts[0]
     L, kmax = spline.length, spline.max_curvature
     def invert(duration):
         M = max(1, int(round(duration / dt)))
         s = np.linspace(0.0, L, M + 1)
         target_points, tangents = spline.at_arclength(s)
+        target_points = (target_points - origin) @ Q.T
+        tangents = tangents @ Q.T
         if align:
             tangents[0] = Z
         return M, target_points, tangents_to_ps(tangents, dt, umax, phase_start)

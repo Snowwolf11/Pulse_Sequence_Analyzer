@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBo
 from psa.design.conversion import curve_to_ps, ps_to_curve
 from psa.design.families import FAMILIES, CustomCurve, family_by_name
 from psa.editor_gui.widgets import ACCENT, BAD, MUTED_FG, Mpl3D, lock_heights, make_plot
+from psa.editor_gui.solver_box import SolverBox
 
 SLIDER_STEPS = 1000
 
@@ -159,6 +160,13 @@ class FamiliesTab(QWidget):
                                             brush=pg.mkBrush(56, 189, 248, 40))
         self.phase_curve = self.phase_plot.plot(stepMode="center", pen=pg.mkPen(ACCENT, width=1.5))
         rl.addWidget(self.amp_plot); rl.addWidget(self.phase_plot)
+        self.right_layout = rl
+        self.solver_box = SolverBox("Solve: adjust family parameters", show_variables=True,
+                                    variables_hint="continuous parameters; curve families keep the current duration")
+        self.solver_box.job_provider = self._solver_job
+        self.solver_box.solved.connect(self._apply_solution)
+        self.solver_box.running.connect(lambda on: self._set_editing_enabled(not on))
+        rl.addWidget(self.solver_box)
         splitter.addWidget(right)
         splitter.setStretchFactor(1, 2)
 
@@ -188,8 +196,51 @@ class FamiliesTab(QWidget):
             self.controls[p.name] = c
         lock_heights(self.param_group)
         self.expr_group.setVisible(isinstance(fam, CustomCurve))
+        if hasattr(self, "solver_box"):
+            self.solver_box.set_variables([(p.name, f"{p.label}") for p in fam.params if not p.integer])
         self.dur_group.setVisible(fam.kind == "curve")
         self.schedule()
+
+    # --------------------------------------------------------------- solver ---
+    def fit_to_height(self, height):
+        """3D view and the two plots fill the visible height; the solver box lies below (scrolling)."""
+        rl = self.right_layout
+        m = rl.contentsMargins()
+        avail = height - m.top() - m.bottom() - 3 * rl.spacing()
+        self.curve_view.setFixedHeight(max(320, avail // 2))
+        for p in (self.amp_plot, self.phase_plot):
+            p.setFixedHeight(max(180, avail // 4))
+
+    def _solver_job(self, goals, keys):
+        if not keys:
+            raise ValueError("no free variables: tick some parameters in the list")
+        fam = self.family
+        design = self.to_dict()
+        design.update(dt=self.dt, umax=self.umax, duration=None)
+        if fam.kind == "curve":
+            ps = self.pulse if self.pulse is not None else self.compute()
+            if ps is None:
+                raise ValueError("the current parameters do not give a pulse (see the message above)")
+            design["duration"] = ps.duration          # fixed during the solve: the sub-pulse count stays constant
+        return {"kind": "family", "design": design, "free": list(keys)}
+
+    def _apply_solution(self, solution, info):
+        for name, v in solution["values"].items():
+            if name in self.controls:
+                self.controls[name].set_value(v)
+        if self.family.kind == "curve" and solution.get("duration"):
+            self.dur_fixed.setChecked(True)
+            self.dur_spin.setValue(solution["duration"] * 1e3)
+        self._timer.stop()
+        self.compute()
+
+    def _set_editing_enabled(self, on):
+        from PySide6.QtWidgets import QAbstractButton, QAbstractSpinBox, QComboBox, QLineEdit, QSlider
+        inside_box = set(self.solver_box.findChildren(QWidget))
+        for cls in (QAbstractButton, QAbstractSpinBox, QComboBox, QLineEdit, QSlider):
+            for w in self.findChildren(cls):
+                if w not in inside_box:
+                    w.setEnabled(on)
 
     def set_metadata(self, dt, umax):
         self.dt, self.umax = dt, umax

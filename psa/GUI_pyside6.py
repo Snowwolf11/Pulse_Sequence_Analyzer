@@ -189,13 +189,17 @@ class MplPlot(QWidget):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, parent):
+    def __init__(self, parent, initial_tab="General"):
         super().__init__(parent)
+        from psa.editor_gui.solver_settings import SolverSettingsWidget
         self.parent_app = parent
         self.setWindowTitle("Settings")
-        self.setMinimumWidth(360)
+        self.setMinimumWidth(420)
 
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        general = QWidget()
+        layout = QVBoxLayout(general)
 
         vector_group = QGroupBox("Initial Vector (error direction / noise axis)")
         vector_form = QFormLayout(vector_group)
@@ -246,6 +250,13 @@ class SettingsDialog(QDialog):
         self.display_values_checkbox = QCheckBox("Display values")
         self.display_values_checkbox.setChecked(parent.disp_values)
         layout.addWidget(self.display_values_checkbox)
+        layout.addStretch()
+
+        self.solver_widget = SolverSettingsWidget(parent.solver_settings)
+        self.tabs.addTab(general, "General")
+        self.tabs.addTab(self.solver_widget, "Solver")
+        self.tabs.setCurrentWidget(self.solver_widget if initial_tab == "Solver" else general)
+        outer.addWidget(self.tabs)
 
         buttons = QHBoxLayout()
         save_button = QPushButton("Save")
@@ -257,9 +268,12 @@ class SettingsDialog(QDialog):
         buttons.addWidget(save_button)
         buttons.addWidget(reset_button)
         buttons.addWidget(close_button)
-        layout.addLayout(buttons)
+        outer.addLayout(buttons)
 
     def save(self):
+        if self.solver_widget.apply():
+            self.tabs.setCurrentWidget(self.solver_widget)
+            return
         self.parent_app.initialVector = np.array(
             [self.x_spin.value(), self.y_spin.value(), self.z_spin.value()]
         )
@@ -355,6 +369,12 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         self.calculationMethod = DEFAULTS.calculation_method
         self.initialVector = get_default_initial_vector()
         self.initialMagnetization = get_default_initial_magnetization()
+        if getattr(self, "solver_settings", None) is None:
+            from psa.design.optimize import SolverSettings
+            self.solver_settings = SolverSettings()
+        else:                                   # reset in place: the editor shares this object
+            from psa.design.optimize import SolverSettings
+            self.solver_settings.__dict__.update(SolverSettings().__dict__)
 
         self.disp_values = False
         self.update_count = 0
@@ -802,6 +822,12 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         self.calculationMethod = DEFAULTS.calculation_method
         self.initialVector = get_default_initial_vector()
         self.initialMagnetization = get_default_initial_magnetization()
+        if getattr(self, "solver_settings", None) is None:
+            from psa.design.optimize import SolverSettings
+            self.solver_settings = SolverSettings()
+        else:                                   # reset in place: the editor shares this object
+            from psa.design.optimize import SolverSettings
+            self.solver_settings.__dict__.update(SolverSettings().__dict__)
 
         self.pulse_sequence_edit.setText(self.PS)
         self.pulse_amplitude_spin.setValue(10)

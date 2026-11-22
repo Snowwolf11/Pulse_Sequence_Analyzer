@@ -12,11 +12,11 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from scipy.linalg import expm
 
 from psa.rotations import propagate_batch, quaternion_to_matrix
 from psa.design.pulse import PulseSequence
 from psa.design.conversion import ps_to_curve, ps_to_tangents
+from psa.design import jets as J
 
 SX = np.array([[0, 1], [1, 0]], dtype=complex)
 SY = np.array([[0, -1j], [1j, 0]], dtype=complex)
@@ -32,7 +32,12 @@ def final_quaternion(ps: PulseSequence, offset_hz=0.0) -> np.ndarray:
 def gate(ps: PulseSequence) -> dict:
     """Bloch rotation R of the whole pulse: axis (unit vector), angle in [0, 180] deg, matrix,
     and SU(2) quaternion (w, x, y, z) with U = w I - i (x sx + y sy + z sz)."""
-    q = final_quaternion(ps)
+    return _gate_from_U(J.product_jets(_segment_jets(ps, order=0))[0])
+
+
+def _gate_from_U(U):
+    q = J.quaternion_of(U)
+    q = q / np.linalg.norm(q)
     if q[0] < 0:
         q = -q
     w = min(1.0, max(-1.0, float(q[0])))
@@ -42,63 +47,36 @@ def gate(ps: PulseSequence) -> dict:
     return {"axis": axis, "angle_deg": angle, "matrix": quaternion_to_matrix(q), "quaternion": q}
 
 
-# ------------------------------------------------------------- robustness ---
-
-def _segment_jets(ps: PulseSequence) -> np.ndarray:
-    """Taylor jets (X0..X3) in delta of every sub-pulse propagator, shape (N, 4, 2, 2)."""
-    ux = 2 * np.pi * ps.umax * ps.amplitude / 100.0 * np.cos(np.radians(ps.phase))
-    uy = 2 * np.pi * ps.umax * ps.amplitude / 100.0 * np.sin(np.radians(ps.phase))
-    A0 = -0.5j * (ux[:, None, None] * SX + uy[:, None, None] * SY)
-    A1 = np.broadcast_to(-0.5j * SZ, A0.shape)
-    Z2 = np.zeros_like(A0)
-    big = np.block([[A0, Z2, Z2, Z2], [A1, A0, Z2, Z2], [Z2, A1, A0, Z2], [Z2, Z2, A1, A0]]) * ps.dt
-    E = expm(big)                                  # (N, 8, 8); first block column = jets of exp
-    return np.stack([E[:, 2 * k:2 * k + 2, 0:2] for k in range(4)], axis=1)
+def _segment_jets(ps: PulseSequence, perturbation="detuning", order=3) -> np.ndarray:
+    """Taylor jets (N, order+1, 2, 2) of every sub-pulse propagator in the detuning delta
+    (H -> H + delta sz / 2) or in the relative amplitude error epsilon (H -> (1 + epsilon) H)."""
+    w = 2 * np.pi * ps.umax * ps.amplitude / 100.0 * ps.dt
+    ph = np.radians(ps.phase)
+    v0 = np.column_stack([w * np.cos(ph), w * np.sin(ph), np.zeros(ps.N)])
+    d = v0 if perturbation == "amplitude" else np.array([0.0, 0.0, ps.dt])
+    return J.step_jets(v0, d, order)
 
 
-def _compose(later, earlier):
-    """Jets of the product later @ earlier (truncated Cauchy product), arrays (..., 4, 2, 2)."""
-    out = np.zeros_like(earlier)
-    for k in range(4):
-        for i in range(k + 1):
-            out[..., k, :, :] += later[..., i, :, :] @ earlier[..., k - i, :, :]
-    return out
+def propagator_jets(ps: PulseSequence, perturbation="detuning", order=3) -> np.ndarray:
+    """Jets X0..X_order of U(T; delta) = sum_k delta^k X_k (tree reduction, time order preserved)."""
+    return J.product_jets(_segment_jets(ps, perturbation, order))
 
 
-def propagator_jets(ps: PulseSequence) -> np.ndarray:
-    """Jets X0..X3 of U(T; delta) = sum_k delta^k X_k (tree reduction, time order preserved)."""
-    jets = _segment_jets(ps)
-    if len(jets) == 0:
-        out = np.zeros((4, 2, 2), dtype=complex); out[0] = np.eye(2)
-        return out
-    while len(jets) > 1:
-        if len(jets) % 2:
-            jets = np.concatenate([jets, _identity_jet()[None]], axis=0)
-        jets = _compose(jets[1::2], jets[0::2])
-    return jets[0]
+# kept for older imports
+_compose, _to_vector = J.compose, J.to_vector
 
 
 def _identity_jet():
-    out = np.zeros((4, 2, 2), dtype=complex)
-    out[0] = np.eye(2)
-    return out
-
-
-def _to_vector(M, k):
-    # M_k = -i A_k . sigma / 2^k  ->  A_k,j = i 2^(k-1) tr(M_k sigma_j)
-    return np.real([1j * 2 ** (k - 1) * np.trace(M @ s) for s in (SX, SY, SZ)])
+    return J.identity_jet(4)
 
 
 def robustness(ps: PulseSequence) -> dict:
     """Exact robustness vectors A1, A2, A3 (s, s^2, s^3) and normalized magnitudes |A_k| / T^k."""
-    X = propagator_jets(ps)
-    U0d = X[0].conj().T
-    D1, D2, D3 = U0d @ X[1], U0d @ X[2], U0d @ X[3]
-    M1 = D1
-    M2 = D2 - D1 @ D1 / 2
-    M3 = D3 - (D1 @ D2 + D2 @ D1) / 2 + D1 @ D1 @ D1 / 3
-    A = [_to_vector(M, k) for k, M in enumerate((M1, M2, M3), start=1)]
-    T = ps.duration
+    return _robustness_from_jets(propagator_jets(ps), ps.duration)
+
+
+def _robustness_from_jets(X, T):
+    A = J.magnus_vectors(X)
     return {"A1": A[0], "A2": A[1], "A3": A[2],
             "A1_norm": np.linalg.norm(A[0]) / T if T else 0.0,
             "A2_norm": np.linalg.norm(A[1]) / T ** 2 if T else 0.0,
@@ -118,14 +96,34 @@ def robustness_geometric(points, tangents=None) -> dict:
 
 
 def amplitude_robustness(ps: PulseSequence) -> dict:
-    """First-order amplitude-scaling (B1) robustness: the vector area of the tangent curve,
-    -int t x t' dt (zero for first-order B1-robust UR pulses; see the paper)."""
+    """First-order robustness against amplitude scaling Omega -> (1 + epsilon) Omega (exact):
+    M1 = -i B . sigma / 2 with B = int Omega R^T n dt = -int t x t' dt (radians; the vector area of the
+    tangent curve, see the paper). B1_norm = |B| / int Omega dt (0 = first-order B1 robust)."""
+    if ps.N == 0:
+        return {"B1": np.zeros(3), "B1_norm": 0.0}
+    X = propagator_jets(ps, "amplitude", order=1)
+    B = J.to_vector(X[0].conj().T @ X[1], 1)
+    nutation = _nutation(ps)
+    return {"B1": B, "B1_norm": np.linalg.norm(B) / nutation if nutation else 0.0}
+
+
+def _nutation(ps):
+    return float(np.sum(2 * np.pi * ps.umax * np.abs(ps.amplitude) / 100.0) * ps.dt)
+
+
+def analyze(ps: PulseSequence, b1=True) -> dict:
+    """Gate, A1..A3 and (optionally) B1 in one pass over the pulse (the gate comes with the jets)."""
+    X = propagator_jets(ps)
+    out = {"gate": _gate_from_U(X[0]), "robustness": _robustness_from_jets(X, ps.duration)}
+    if b1:
+        out["B1"] = amplitude_robustness(ps)
+    return out
+
+
+def amplitude_robustness_geometric(ps: PulseSequence) -> np.ndarray:
+    """-int t x t' dt from the sampled tangents (independent cross-check of ``amplitude_robustness``)."""
     t = ps_to_tangents(ps)
-    dt_ = np.diff(t, axis=0)
-    mid = (t[:-1] + t[1:]) / 2
-    B = -np.sum(np.cross(mid, dt_), axis=0) * ps.dt
-    T = ps.duration
-    return {"B1": B, "B1_norm": np.linalg.norm(B) / T if T else 0.0}
+    return -np.sum(np.cross((t[:-1] + t[1:]) / 2, np.diff(t, axis=0)), axis=0)
 
 
 # --------------------------------------------------------------- fidelity ---

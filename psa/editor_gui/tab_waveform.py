@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFileDialog, QGridLayo
 from psa.design.pulse import PulseSequence
 from psa.design.waveform import HOLD, LINEAR, Waveform
 from psa.editor_gui.widgets import ACCENT, MUTED_FG, KeyframeItem, make_plot
+from psa.editor_gui.solver_box import SolverBox
 
 
 class WaveformTab(QWidget):
@@ -113,6 +114,14 @@ class WaveformTab(QWidget):
             layout.addWidget(p, stretch=1)
         self.plots["phase"].setXLink(self.plots["amplitude"])
         self.plots["amplitude"].setYRange(0, 105)
+
+        # ---- solver (below the plots)
+        self.solver_box = SolverBox("Solve: adjust keyframe values", show_variables=True,
+                                    variables_hint="keyframe values (their times stay fixed)")
+        self.solver_box.job_provider = self._solver_job
+        self.solver_box.solved.connect(self._apply_solution)
+        self.solver_box.running.connect(lambda on: self._set_editing_enabled(not on))
+        layout.addWidget(self.solver_box)
         for name, p in self.plots.items():
             p.getPlotItem().vb.sigRangeChanged.connect(lambda *a: self._sync_range_spins())
         self.refresh(emit=False)
@@ -135,6 +144,10 @@ class WaveformTab(QWidget):
             xs = np.array([k.index for k in ch.keyframes]) * m.dt * 1e6
             self.items[name].set_points(xs, np.array([k.value for k in ch.keyframes]), sel)
         self.n_label.setText(f"= {m.N} sub-pulses of {m.dt * 1e6:g} µs")
+        if hasattr(self, "solver_box"):
+            self.solver_box.set_variables(
+                [((name, k.index), f"{name} @ {k.index * m.dt * 1e6:.3f} µs") for name in ("amplitude", "phase")
+                 for k in self.channel(name).keyframes])
         self._update_selection_widgets()
         if emit:
             self.pulseChanged.emit(self.current_pulse())
@@ -149,6 +162,48 @@ class WaveformTab(QWidget):
         self.duration_spin.setValue(self.model.duration * 1e3)
         self.selection = None
         self.refresh()
+
+    def fit_to_height(self, height):
+        """Make the two plots fill the visible height (the solver box then lies below, by scrolling)."""
+        lay = self.layout()
+        above = 0
+        for i in range(lay.count()):
+            w = lay.itemAt(i).widget() or lay.itemAt(i).layout()
+            if w is self.plots["amplitude"]:
+                break
+            above += (w.sizeHint().height() if w is not None else 0) + lay.spacing()
+        margins = lay.contentsMargins()
+        top = self.plots["amplitude"].geometry().top()
+        above = max(above, top) if top > 0 else above
+        avail = height - above - margins.top() - 2 * lay.spacing()
+        h = max(220, avail // 2)
+        for p in self.plots.values():
+            p.setFixedHeight(h)
+
+    # --------------------------------------------------------------- solver ---
+    def _solver_job(self, goals, keys):
+        if not keys:
+            raise ValueError("no free variables: tick some keyframes in the list")
+        return {"kind": "waveform", "design": self.model.to_dict(), "free": [list(k) for k in keys]}
+
+    def _apply_solution(self, solution, info):
+        self.model = Waveform.from_dict(solution)
+        self.selection = None
+        self.refresh()
+
+    def _set_editing_enabled(self, on):
+        from PySide6.QtWidgets import QAbstractButton, QAbstractSpinBox, QComboBox
+        inside_box = set(self.solver_box.findChildren(QWidget))
+        for cls in (QAbstractButton, QAbstractSpinBox, QComboBox):
+            for w in self.findChildren(cls):
+                if w not in inside_box and w.parent() is not None:
+                    w.setEnabled(on)
+        for item in self.items.values():
+            item.setEnabled(on)
+        self._editing = on
+
+    def _scene_clicked_allowed(self):
+        return getattr(self, "_editing", True)
 
     # ---------------------------------------------------------- axis ranges ---
     def _view(self, key):
@@ -203,7 +258,7 @@ class WaveformTab(QWidget):
         self.refresh()
 
     def _scene_clicked(self, name, ev):
-        if not ev.double() or ev.button() != Qt.MouseButton.LeftButton:
+        if not ev.double() or ev.button() != Qt.MouseButton.LeftButton or not self._scene_clicked_allowed():
             return
         vb = self.plots[name].getPlotItem().vb
         if not vb.sceneBoundingRect().contains(ev.scenePos()):

@@ -116,7 +116,7 @@ def test_solver_closes_curve_first_and_second_order():
                Segment("arc", {"radius": 20, "angle": 120}, twist=150, free=["angle", "twist"]))
     assert d.robustness()["A1_norm"] > 1e-2
     solved, res = d.solve(orders=(1,))
-    assert res["norms"][1] < 1e-9, res
+    assert res["reached"] and res["norms"][1] < 1e-8, res          # stops once below the "solved" threshold
     d2 = design(Segment("arc", {"radius": 20, "angle": 180}),
                 Segment("arc", {"radius": 20, "angle": 180}, twist=170, free=["angle", "twist"]),
                 Segment("arc", {"radius": 20, "angle": 180}, twist=100, free=["angle", "twist"]),

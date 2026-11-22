@@ -27,11 +27,10 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
 import numpy as np
-from scipy.linalg import expm
-from scipy.optimize import least_squares
 
 from psa.design.conversion import _rotation_from_axis_angle
-from psa.design.metrics import SX, SY, SZ, _compose, _identity_jet, _to_vector
+from psa.design import jets as J
+from psa.design.jets import SX, SY, SZ, to_vector as _to_vector
 from psa.design.pulse import PulseSequence
 
 KINDS = ("line", "arc", "helix", "bezier")
@@ -45,10 +44,6 @@ UNITS = {"length": "µs", "radius": "µs", "pitch": "µs/turn", "angle": "°", "
          "p2x": "µs", "p2y": "µs", "p2z": "µs", "p3x": "µs", "p3y": "µs", "p3z": "µs"}
 BOUNDS = {"length": (0.0, 1e6), "radius": (1e-3, 1e6), "pitch": (-1e6, 1e6), "angle": (0.0, 36000.0),
           "twist": (-1e5, 1e5), "p1": (0.0, 1e6)}
-
-
-class SolveCancelled(Exception):
-    """Raised inside the solver when the user stops it."""
 
 
 @dataclass
@@ -89,11 +84,6 @@ class Piece:
     phidot: float         # rad/s
     T: float              # s
     segment: int
-
-
-def _rz(angle):
-    """SU(2) z rotation exp(-i angle sz / 2)."""
-    return np.diag([np.exp(-0.5j * angle), np.exp(0.5j * angle)])
 
 
 def _bloch_rz(angle):
@@ -228,29 +218,23 @@ class CurveDesign:
         pieces = self.pieces()[0] if pieces is None else pieces
         return sum(p.T for p in pieces)
 
-    def jets(self, pieces=None):
-        """Exact Taylor jets of the propagator U(T; delta) of the continuous model."""
+    def jets(self, pieces=None, perturbation="detuning", order=3):
+        """Exact Taylor jets of the propagator of the continuous model in the detuning delta, or in the
+        relative amplitude error epsilon (Omega -> (1 + epsilon) Omega) for perturbation="amplitude".
+        Piece = Rz(phi0 + phidot T) exp(-i T (Omega/2 sx - phidot/2 sz + delta/2 sz)) Rz(phi0)^dag."""
         pieces = self.pieces()[0] if pieces is None else pieces
         if not pieces:
-            return _identity_jet()
+            return J.identity_jet(order + 1)
         Omega = np.array([p.Omega for p in pieces]); phid = np.array([p.phidot for p in pieces])
-        T = np.array([p.T for p in pieces])
-        A0 = -1j * ((Omega / 2)[:, None, None] * SX - (phid / 2)[:, None, None] * SZ)
-        A1 = np.broadcast_to(-0.5j * SZ, A0.shape)
-        Z2 = np.zeros_like(A0)
-        big = np.block([[A0, Z2, Z2, Z2], [A1, A0, Z2, Z2], [Z2, A1, A0, Z2], [Z2, Z2, A1, A0]]) * T[:, None, None]
-        E = expm(big)
-        J = np.stack([E[:, 2 * k:2 * k + 2, 0:2] for k in range(4)], axis=1)
-        out = []
-        for p, j in zip(pieces, J):
-            a, b = _rz(p.phi0 + p.phidot * p.T), _rz(p.phi0).conj().T
-            out.append(np.einsum("ij,kjl,lm->kim", a, j, b))
-        jets = np.array(out)
-        while len(jets) > 1:
-            if len(jets) % 2:
-                jets = np.concatenate([jets, _identity_jet()[None]], axis=0)
-            jets = _compose(jets[1::2], jets[0::2])
-        return jets[0]
+        T = np.array([p.T for p in pieces]); phi0 = np.array([p.phi0 for p in pieces])
+        v0 = np.column_stack([Omega * T, np.zeros_like(T), -phid * T])
+        d = np.column_stack([Omega * T, 0 * T, 0 * T]) if perturbation == "amplitude" else np.column_stack([0 * T, 0 * T, T])
+        jets = J.step_jets(v0, d, order)                                   # rotating frame
+        a = phi0 + phid * T                                                # Rz(a) X Rz(phi0)^dag, diagonal factors
+        left = np.stack([np.exp(-0.5j * a), np.exp(0.5j * a)], axis=-1)
+        right = np.stack([np.exp(0.5j * phi0), np.exp(-0.5j * phi0)], axis=-1)
+        jets = left[:, None, :, None] * jets * right[:, None, None, :]
+        return J.product_jets(jets)
 
     def robustness(self, pieces=None):
         """Exact A1, A2, A3 (s^k) of the continuous model and |A_k| / T^k."""
@@ -302,6 +286,17 @@ class CurveDesign:
             last = pos
         return out
 
+    def metrics(self, b1=False):
+        """Metrics dict of the continuous model in the format of psa.design.optimize."""
+        pieces, _ = self.pieces()
+        rb = self.robustness(pieces)
+        out = {"A": {1: rb["A1"], 2: rb["A2"], 3: rb["A3"]}, "T": self.duration(pieces), "R": self.gate_matrix(pieces)}
+        if b1:
+            X = self.jets(pieces, "amplitude")
+            out["B1"] = _to_vector(X[0].conj().T @ X[1], 1)
+            out["nutation"] = float(sum(abs(p.Omega) * p.T for p in pieces))
+        return out
+
     def gate_matrix(self, pieces=None):
         pieces = self.pieces()[0] if pieces is None else pieces
         R = np.eye(3)
@@ -332,77 +327,16 @@ class CurveDesign:
     def free_parameters(self):
         return [(i, name) for i, s in enumerate(self.segments) for name in s.free]
 
-    def solve(self, orders=(1,), weights=None, max_nfev=400, callback=None):
-        """Adjust the free parameters so that |A_k| / T^k vanish for the given orders (least squares).
-
-        ``callback(nfev, best_cost)`` is called after every evaluation; if it returns True the solver
-        stops and the best parameters found so far are returned (result["cancelled"] = True).
+    def solve(self, orders=(1,), target=None, b1=False, max_nfev=None, callback=None, settings=None):
+        """Adjust the free parameters for the goals (see psa.design.optimize): cancel the detuning orders,
+        optionally reach a target gate (axis, angle_deg) and first-order B1 robustness.
+        ``callback(nfev, best_cost)`` returning True stops the solver (best parameters so far are kept).
         Returns (new design, result dict)."""
-        free = self.free_parameters()
-        if not free:
-            raise ValueError("no free parameters: tick 'free' for some segment parameters")
-        design = self.copy()
-        x0 = np.array([design.segments[i].get(n) for i, n in free])
-        lo = np.array([BOUNDS.get(n, (-1e6, 1e6))[0] for _, n in free])
-        hi = np.array([BOUNDS.get(n, (-1e6, 1e6))[1] for _, n in free])
-        for k, (i, n) in enumerate(free):
-            if n == "radius" and design.segments[i].kind == "arc":
-                lo[k] = max(lo[k], self.r_min_us)
-        x0 = np.clip(x0, lo, hi)
-        weights = weights or {1: 1.0, 2: 1.0, 3: 1.0}
-
-        best = {"x": x0.copy(), "cost": np.inf, "nfev": 0}
-
-        def residual(x):
-            for (i, n), v in zip(free, x):
-                design.segments[i].set(n, v)
-            rb = design.robustness()
-            T = design.duration()
-            if T <= 0:
-                r = np.full(3 * len(orders), 1.0)
-            else:
-                r = np.concatenate([weights[k] * rb[f"A{k}"] / T ** k for k in orders])
-            cost = float(np.linalg.norm(r))
-            best["nfev"] += 1
-            if cost < best["cost"]:
-                best.update(x=np.array(x, dtype=np.float64), cost=cost)
-            if callback is not None and callback(best["nfev"], best["cost"]):
-                raise SolveCancelled()
-            return r
-
-        cancelled, message, success = False, "", False
-        try:
-            res = least_squares(residual, x0, bounds=(lo, hi), x_scale="jac", max_nfev=max_nfev,
-                                xtol=1e-12, ftol=1e-14, gtol=1e-14)
-            x, message, success = res.x, res.message, bool(res.success)
-            if best["cost"] < float(np.linalg.norm(res.fun)):
-                x = best["x"]
-        except SolveCancelled:
-            x, cancelled, message = best["x"], True, "stopped by the user"
-        for (i, n), v in zip(free, x):
-            design.segments[i].set(n, v)
+        from psa.design.optimize import Goals, solve_problem
+        solution, info = solve_problem("builder", self.to_dict(), None, Goals(tuple(orders), target, b1),
+                                       callback, max_nfev, settings)
+        design = CurveDesign.from_dict(solution)
         rb = design.robustness()
-        return design, {"success": success, "cancelled": cancelled, "message": message, "cost": best["cost"],
-                        "nfev": best["nfev"], "values": {f"{i + 1}:{n}": float(v) for (i, n), v in zip(free, x)},
-                        "norms": {k: rb[f"A{k}_norm"] for k in (1, 2, 3)}}
-
-
-def solve_in_process(design_dict, orders, max_nfev, queue, stop_event):
-    """Entry point of a solver process: progress ("progress", nfev, cost) and the final result
-    ("done", design_dict, result) or ("error", message) are put on ``queue``; setting ``stop_event``
-    makes the solver return its best parameters so far."""
-    try:
-        design = CurveDesign.from_dict(design_dict)
-        last = [0]
-
-        def callback(nfev, cost):
-            if nfev - last[0] >= 5 or nfev == 1:
-                last[0] = nfev
-                queue.put(("progress", nfev, cost))
-            return stop_event.is_set()
-
-        solved, res = design.solve(orders=tuple(orders), callback=callback, max_nfev=max_nfev)
-        res["norms"] = {int(k): float(v) for k, v in res["norms"].items()}
-        queue.put(("done", solved.to_dict(), res))
-    except Exception as e:                                   # pragma: no cover - reported to the GUI
-        queue.put(("error", f"{type(e).__name__}: {e}"))
+        info["norms"] = {k: rb[f"A{k}_norm"] for k in (1, 2, 3)}
+        info["values"] = {f"{i + 1}:{n}": design.segments[i].get(n) for i, n in design.free_parameters()}
+        return design, info

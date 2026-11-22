@@ -5,7 +5,8 @@ import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QMainWindow, QScrollArea, QSplitter, QTabWidget, QWidget
+from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QMainWindow, QPushButton, QScrollArea, QSplitter,
+                               QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
 from psa.editor_gui.panel import SummaryPanel
 from psa.editor_gui.widgets import lock_heights
@@ -16,9 +17,20 @@ from psa.editor_gui.tab_builder import BuilderTab
 from psa.editor_gui.tab_import import ImportTab
 
 
+class FitScrollArea(QScrollArea):
+    """Scroll area that tells its widget the visible height (``fit_to_height``), so that tabs can keep
+    their main plots as large as the visible area and put extra content (e.g. the solver) below."""
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        w = self.widget()
+        if hasattr(w, "fit_to_height"):
+            w.fit_to_height(self.viewport().height())
+
+
 def scrollable(widget):
     """Wrap ``widget`` in a vertically scrollable area (content keeps its minimum height)."""
-    area = QScrollArea()
+    area = FitScrollArea()
     area.setWidgetResizable(True)
     area.setFrameShape(QFrame.Shape.NoFrame)
     area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -37,6 +49,8 @@ class PulseEditorWindow(QMainWindow):
         self.setWindowTitle("Pulse Sequence Editor")
         save_path = save_path or os.path.join(os.path.expanduser("~"), "Edited_Pulse_Sequence.csv")
 
+        from psa.design.optimize import SolverSettings
+        self.solver_settings = getattr(main_window, "solver_settings", None) or SolverSettings()
         self.panel = SummaryPanel(dt, umax, save_path)
         self.tabs = QTabWidget()
         self.text_tab = TextTab(dt, umax)
@@ -51,6 +65,10 @@ class PulseEditorWindow(QMainWindow):
             self._tab_list.append(tab)
             self.tabs.addTab(scrollable(tab), title)
 
+        self.help_button = QPushButton("Help")
+        self.help_button.clicked.connect(self.show_help)
+        self.tabs.setCornerWidget(self.help_button, Qt.Corner.TopRightCorner)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.tabs)
         splitter.addWidget(scrollable(self.panel))
@@ -64,6 +82,10 @@ class PulseEditorWindow(QMainWindow):
 
         for tab in self.all_tabs():
             tab.pulseChanged.connect(lambda ps, t=tab: self._pulse_changed(t, ps))
+        for tab in self.all_tabs():
+            if hasattr(tab, "solver_box"):
+                tab.solver_box.settings_provider = lambda: self.solver_settings
+                tab.solver_box.settingsRequested.connect(self.open_solver_settings)
         self.waveform_tab.requestTextPulse.connect(self._waveform_from_text)
         self.families_tab.editInWaveform.connect(self._edit_in_waveform)
         self.builder_tab.editInWaveform.connect(self._edit_in_waveform)
@@ -82,8 +104,34 @@ class PulseEditorWindow(QMainWindow):
         avail = screen.availableGeometry()
         self.resize(min(1500, int(avail.width() * 0.95)), min(950, int(avail.height() * 0.92)))
 
+    def open_solver_settings(self):
+        """Solver tab of the analyzer's Settings dialog (or a stand-alone dialog without analyzer)."""
+        mw = self.main_window
+        if mw is not None and hasattr(mw, "solver_settings"):
+            from psa.GUI_pyside6 import SettingsDialog
+            self._settings_dialog = SettingsDialog(mw, initial_tab="Solver")
+        else:
+            from psa.editor_gui.solver_settings import SolverSettingsDialog
+            self._settings_dialog = SolverSettingsDialog(self.solver_settings, self)
+        self._settings_dialog.exec()
+
+    def show_help(self):
+        from psa.documentation import EDITOR_DOCUMENTATION_STR
+        if getattr(self, "_help", None) is None:
+            self._help = QDialog(self)
+            self._help.setWindowTitle("Pulse Sequence Editor – Help")
+            self._help.resize(820, 760)
+            lay = QVBoxLayout(self._help)
+            text = QTextEdit(); text.setReadOnly(True); text.setPlainText(EDITOR_DOCUMENTATION_STR)
+            lay.addWidget(text)
+            close = QPushButton("Close"); close.clicked.connect(self._help.close)
+            lay.addWidget(close)
+        self._help.show(); self._help.raise_()
+
     def closeEvent(self, event):
-        self.builder_tab.stop_solver(wait=True)
+        for tab in self.all_tabs():
+            if hasattr(tab, "solver_box"):
+                tab.solver_box.stop(wait=True)
         super().closeEvent(event)
 
     def all_tabs(self):

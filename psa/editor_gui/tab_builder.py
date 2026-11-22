@@ -12,10 +12,8 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
                                QHBoxLayout, QLabel, QListWidget, QPushButton, QSplitter, QVBoxLayout, QWidget)
 
-import multiprocessing as mp
-import queue as queue_module
-
-from psa.design.builder import PARAMS, UNITS, CurveDesign, Segment, solve_in_process
+from psa.design.builder import PARAMS, UNITS, CurveDesign, Segment
+from psa.editor_gui.solver_box import SolverBox
 from psa.editor_gui.widgets import ACCENT, ACCENT_2, BAD, GOOD, MUTED_FG, KeyframeItem, Mpl3D, lock_heights, make_plot
 
 PROJECTIONS = (("xy", 0, 1), ("xz", 0, 2), ("yz", 1, 2))
@@ -81,20 +79,15 @@ class BuilderTab(QWidget):
         self.rmin_label = QLabel(""); self.rmin_label.setStyleSheet(f"color: {MUTED_FG};"); self.rmin_label.setWordWrap(True)
         ll.addWidget(self.rmin_label)
 
-        solve_group = QGroupBox("Solve")
-        solve_group.setToolTip("adjusts the parameters marked 'free'")
-        sv = QVBoxLayout(solve_group)
-        orow = QHBoxLayout()
-        self.order_checks = {k: QCheckBox(t) for k, t in ((1, "1st order (closed)"), (2, "2nd (areas)"), (3, "3rd"))}
-        self.order_checks[1].setChecked(True)
-        for c in self.order_checks.values():
-            orow.addWidget(c)
-        sv.addLayout(orow)
-        self.solve_button = QPushButton("Solve"); self.solve_button.clicked.connect(self.solve)
-        sv.addWidget(self.solve_button)
-        self.solve_label = QLabel(""); self.solve_label.setWordWrap(True)
-        sv.addWidget(self.solve_label)
-        ll.addWidget(solve_group)
+        self.solver_box = SolverBox("Solve", show_variables=False,
+                                    variables_hint="free variables: the segment parameters ticked 'free'")
+        self.solver_box.job_provider = lambda goals, keys: {"kind": "builder", "design": self.design.to_dict(), "free": None}
+        self.solver_box.solved.connect(self._apply_solution)
+        self.solver_box.running.connect(lambda on: self._set_editing_enabled(not on))
+        # names kept for scripts / tests
+        self.solve_button, self.order_checks, self.solve_label = (self.solver_box.button, self.solver_box.order_checks,
+                                                                  self.solver_box.status)
+        ll.addWidget(self.solver_box)
 
         self.info = QLabel(""); self.info.setWordWrap(True)
         ll.addWidget(self.info)
@@ -274,109 +267,28 @@ class BuilderTab(QWidget):
 
     @property
     def solving(self):
-        return getattr(self, "_process", None) is not None
+        return self.solver_box.solving
 
     def solve(self):
-        """Start the solver in a separate process (the GUI stays responsive), or stop it if it runs."""
-        if self.solving:
-            self.stop_solver()
-            return
-        orders = tuple(k for k, c in self.order_checks.items() if c.isChecked())
-        if not orders:
-            self.solve_label.setText("choose at least one order")
-            return
-        if not self.design.free_parameters():
-            self.solve_label.setText("no free parameters: tick 'free' for some segment parameters")
-            return
-        self._orders = orders
-        ctx = mp.get_context("spawn")
-        self._queue = ctx.Queue()
-        self._stop_event = ctx.Event()
-        self._process = ctx.Process(target=solve_in_process, daemon=True,
-                                    args=(self.design.to_dict(), orders, 2000, self._queue, self._stop_event))
-        self._process.start()
-        self._stop_requested_at = None
-        self._poll = QTimer(self); self._poll.setInterval(100); self._poll.timeout.connect(self._poll_solver)
-        self._poll.start()
-        self._set_editing_enabled(False)
-        self.solve_button.setText("Stop")
-        self.solve_label.setStyleSheet("")
-        self.solve_label.setText("starting solver …")
+        self.solver_box.toggle()
 
     def stop_solver(self, wait=False):
-        """Ask the solver to stop (it returns its best result so far); terminate it if it does not react."""
-        if not self.solving:
-            return
-        import time
-        self._stop_event.set()
-        if self._stop_requested_at is None:
-            self._stop_requested_at = time.time()
-        self.solve_label.setText("stopping …")
-        if wait:
-            self._process.join(5)
-            if self._process.is_alive():
-                self._process.terminate()
-            self._finish_solver()
-
-    def _poll_solver(self):
-        import time
-        while True:
-            try:
-                msg = self._queue.get_nowait()
-            except queue_module.Empty:
-                break
-            except (EOFError, OSError):
-                msg = ("error", "the solver process ended unexpectedly")
-            if msg[0] == "progress":
-                self.solve_label.setText(f"solving … {msg[1]} evaluations, best residual {msg[2]:.2e}  (click Stop to interrupt)")
-            elif msg[0] == "done":
-                self._finish_solver()
-                self._apply_solution(CurveDesign.from_dict(msg[1]), msg[2])
-                return
-            elif msg[0] == "error":
-                self._finish_solver()
-                self.solve_label.setStyleSheet(f"color: {BAD};")
-                self.solve_label.setText(msg[1])
-                return
-        if self._stop_requested_at is not None and time.time() - self._stop_requested_at > 5:
-            self._process.terminate()                       # did not react: hard stop, keep the old design
-            self._finish_solver()
-            self.solve_label.setStyleSheet(f"color: {BAD};")
-            self.solve_label.setText("solver terminated (no result)")
-        elif not self._process.is_alive() and self._queue.empty():
-            self._finish_solver()
-            self.solve_label.setStyleSheet(f"color: {BAD};")
-            self.solve_label.setText("the solver process ended without a result")
-
-    def _finish_solver(self):
-        if getattr(self, "_poll", None) is not None:
-            self._poll.stop()
-            self._poll = None
-        if self._process is not None:
-            self._process.join(1)
-        self._process = None
-        self._set_editing_enabled(True)
-        self.solve_button.setText("Solve")
+        self.solver_box.stop(wait)
 
     def _set_editing_enabled(self, on):
         from PySide6.QtWidgets import QAbstractButton, QAbstractSpinBox, QAbstractItemView
+        inside_box = set(self.solver_box.findChildren(QWidget))
         for cls in (QAbstractButton, QAbstractSpinBox, QAbstractItemView):
             for w in self.left_widget.findChildren(cls):
-                if w is not self.solve_button:
+                if w not in inside_box:
                     w.setEnabled(on)
-        self.solve_button.setEnabled(True)
         for h in self.proj_handles.values():
             h.setEnabled(on)
 
-    def _apply_solution(self, solved, res):
-        orders = self._orders
-        self.design = solved
-        ok = all(res["norms"][k] < 1e-8 for k in orders)
-        state = "solved" if ok else ("stopped – best so far" if res.get("cancelled") else "not fully solved")
-        self.solve_label.setStyleSheet(f"color: {GOOD if ok else BAD};")
-        self.solve_label.setText(f"{state} ({res['nfev']} evaluations): " +
-                                 ", ".join(f"|A{k}|/T^{k} = {res['norms'][k]:.1e}" for k in orders) +
-                                 "\n" + ", ".join(f"seg {k} = {v:.5g}" for k, v in res["values"].items()))
+    def _apply_solution(self, solution, info):
+        self.design = CurveDesign.from_dict(solution)
+        self.solver_box.status.setText(self.solver_box.status.text() + "\nfree values: " + ", ".join(
+            f"seg {i + 1} {n} = {self.design.segments[i].get(n):.5g}" for i, n in self.design.free_parameters()))
         self._refresh_list()
         self._timer.stop()
         self.recompute()

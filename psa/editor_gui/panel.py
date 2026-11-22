@@ -146,9 +146,8 @@ class SummaryPanel(QWidget):
             self.fid_curve.setData([], [])
             return
         try:
-            g = metrics.gate(ps)
-            rb = metrics.robustness(ps)
-            b1 = metrics.amplitude_robustness(ps)
+            a = metrics.analyze(ps, b1=True)
+            g, rb, b1 = a["gate"], a["robustness"], a["B1"]
             curve = ps_to_curve(ps)
         except Exception:
             self.status.setText("calculation failed:\n" + traceback.format_exc(limit=2))
@@ -164,6 +163,8 @@ class SummaryPanel(QWidget):
             self._set_value(self.labels[k], v, f"{v:.3e}")
             self.labels[k].setToolTip(f"A{k[1]} / T^{k[1]} = {fmt_vec(rb[k] / ps.duration ** int(k[1]), 4)}")
         self._set_value(self.labels["B1"], b1["B1_norm"], f"{b1['B1_norm']:.3e}")
+        self.labels["B1"].setToolTip("first-order amplitude (B1) scaling error |B1| / ∫Ω dt; B1 = -∫ t × t' dt "
+                                     f"= {fmt_vec(b1['B1'], 4)} rad")
         self.view3d.plot_curve(curve, "error curve (start green, end red)")
         if self.fid_check.isChecked():
             half = self.fid_range.value() * 1e3 / 2

@@ -166,6 +166,14 @@ Supports:
 
 ---
 
+## Pulse Sequence Editor (PySide6 GUI)
+
+Create pulse sequences visually, from curves, or from parametrized curve families, with live evaluation of
+the gate and its robustness, and a solver that adjusts the design for robustness and an optional target gate.
+See [Pulse Sequence Editor](#pulse-sequence-editor) below.
+
+---
+
 ## Fast Calculations
 
 All calculations use a vectorized NumPy backend (no compiled extensions needed).
@@ -184,7 +192,9 @@ psa/
 │   ├── app_backend.py       # GUI-independent analysis functions
 │   ├── rotations.py         # vectorized NumPy rotation backend
 │   ├── createCurve.py, ...  # curve, stability and quality-image calculations
-│   └── tests/               # regression + physics tests
+│   ├── design/              # editor back end: pulse <-> curve, metrics, families, builder, solver
+│   ├── editor_gui/          # editor front end (PySide6 + pyqtgraph)
+│   └── tests/               # regression, physics, editor back-end and GUI tests
 ├── pyproject.toml
 ├── requirements.txt
 └── environment.yml
@@ -321,6 +331,36 @@ Then calculate and export quality images.
 
 ---
 
+# Pulse Sequence Editor
+
+Start the PySide6 interface (`python main.py --gui pyside6`) and click **Edit**. The editor has tabs on the
+left and a live panel on the right; its **Help** button explains everything in detail.
+
+| Tab | What you do |
+|---|---|
+| Text | Write the pulse with the `R(...)` / `PR(...)` syntax (see below). |
+| Waveform | Draw amplitude and phase over time with draggable keyframes (linear or hold between them). |
+| Curve families | Pick a family (helix, Lissajous knot, torus knot, Clelia curve, custom formula, 2H, 4H) and change its parameters live. |
+| Curve builder | Compose the error curve from lines, arcs, helices and Bézier segments with a twist (phase jump) at each junction; edit in 3D and in three projections. |
+| Import curve | Load curve points (x, y, z) or a curvature/torsion table from a CSV / text file. |
+
+The panel shows the gate (rotation angle and axis), the robustness against detuning to first, second and
+third order (end point, area and third-order term of the error curve), the first-order robustness against
+amplitude (B1) scaling, the error curve in 3D and the fidelity vs. offset. Pulses are saved as CSV or Bruker
+shape files and can be sent directly to the analyzer.
+
+**Solver.** In the Waveform, Curve families and Curve builder tabs a solver adjusts free variables
+(keyframe values, family parameters, or builder segment parameters marked "free") so that the chosen goals
+are met: cancel the detuning error to 1st, 2nd and/or 3rd order, B1 robustness, and optionally a target
+gate (angle about an axis). It runs in the background and can be stopped at any time (the best result so
+far is kept). Evaluation limit, tolerances and goal weights are set in Settings → Solver.
+
+Conventions: on resonance, unit-speed error curve whose length is the pulse duration, curvature = Rabi
+frequency, torsion = phase change rate. Curves are converted into pulses exactly (the pulse reproduces the
+curve's tangent at every sub-pulse boundary).
+
+---
+
 # Pulse Sequence Syntax
 
 Example:
@@ -369,6 +409,7 @@ Main dependencies:
 - plotly
 - dash
 - PySide6
+- pyqtgraph
 - mplcursors
 - mpld3
 

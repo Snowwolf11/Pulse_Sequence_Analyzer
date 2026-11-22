@@ -223,6 +223,26 @@ def test_robustness_exact_vs_independent_and_geometric():
     assert np.linalg.norm(rb["A1"] - ps_to_curve(ps)[-1]) < 1e-4 * np.linalg.norm(rb["A1"])
 
 
+def test_amplitude_robustness_exact_and_geometric():
+    ps = random_pulse(300, seed=11)
+    b = metrics.amplitude_robustness(ps)
+    geo = metrics.amplitude_robustness_geometric(ps)
+    assert np.linalg.norm(b["B1"] - geo) < 2e-3 * np.linalg.norm(b["B1"]), (b["B1"], geo)
+    # finite-difference check of the definition: U((1+eps) Omega) ~ U0 exp(-i eps B.sigma/2)
+    from psa.design.pulse import PulseSequence as P
+    eps = 1e-6
+    q0 = metrics.final_quaternion(ps)
+    q1 = metrics.final_quaternion(P(ps.amplitude * (1 + eps), ps.phase, ps.dt, ps.umax))
+    def U(q):
+        return q[0] * np.eye(2) - 1j * (q[1] * SX + q[2] * SY + q[3] * SZ)
+    M = U(q0).conj().T @ U(q1)                                # ~ I - i eps B.sigma/2
+    B_fd = np.real([1j * np.trace((M - np.eye(2)) @ s) for s in (SX, SY, SZ)]) / eps
+    assert np.allclose(B_fd, b["B1"], rtol=1e-4, atol=1e-6)
+    # independent of the sub-pulse duration when the same pulse is sampled finer
+    fine = P(np.repeat(ps.amplitude, 4), np.repeat(ps.phase, 4), ps.dt / 4, ps.umax)
+    assert np.allclose(metrics.amplitude_robustness(fine)["B1_norm"], b["B1_norm"], rtol=1e-9)
+
+
 def test_robustness_of_closed_4h_pulse():
     """The 4H pulse is first- and second-order robust: A1 = A2 = 0."""
     ps = PulseSequence.load(os.path.join(HERE, "data", "PS_4H_closed.bruker"))
