@@ -61,14 +61,14 @@ After each line, press `Enter` and wait until the window shows a new empty line.
    ```bash
    python3.13 -m venv .venv
    source .venv/bin/activate
-   pip install -e .
+   python -m pip install -e .
    ```
 
    **Windows:**
    ```bat
    py -3.13 -m venv .venv
    .venv\Scripts\activate
-   pip install -e .
+   python -m pip install -e .
    ```
 
    The last line downloads everything the analyzer needs. This takes a few minutes and prints a lot of text. That is normal.
@@ -104,7 +104,9 @@ You do not need to repeat steps 1–4. Just:
 | A Mac pop-up asks to install "command line developer tools" | Click "Cancel" and install Python from python.org as in Step 1 instead. |
 | `requires a different Python` or `No matching distribution found for PySide6` | The setup used a Python version newer than 3.13. Install Python 3.13 (Step 1), delete the folder `.venv` inside `Pulse_Sequence_Analyzer-main` (it may be hidden: on Mac press `Cmd`+`Shift`+`.` in Finder to show it), and repeat Step 4. |
 | `No such file or directory: main.py` | The Terminal is not "in" the right folder. Repeat Step 4.1–4.2 (the `cd` + drag step). |
-| The analyzer window does not open, no error | Try the simpler window instead: `python main.py` |
+| Windows: `An application control policy has blocked this file` (German: `Eine Anwendungssteuerungsrichtlinie hat diese Datei blockiert`) for `pip.exe`, `python.exe` or `activate` | Windows blocks unknown programs in your user folders (Smart App Control / App Control). Use `python -m pip install -e .` instead of `pip install -e .`. If the venv's `python.exe` is blocked too, skip the venv and use the installed Python: `py -3.13 -m pip install --user -e .`, then start with `py -3.13 main.py`. If Python itself is blocked (managed work / university laptops), only your IT can allow it. |
+| Windows PowerShell: `running scripts is disabled on this system` after `.venv\Scripts\activate` | Skip the activation and call the venv's Python directly: `.venv\Scripts\python.exe -m pip install -e .` and `.venv\Scripts\python.exe main.py`. |
+| The analyzer window does not open, no error | Try the simpler window instead: `python main.py --gui tkinter` |
 
 ---
 

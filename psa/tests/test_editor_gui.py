@@ -952,6 +952,12 @@ def test_fidelity_window_freedom():
                             {"kind": "PP", "m0": [0, 0, 1], "mt": [1, 0, 0]})
     assert np.mean(fw.result["map"]) <= np.mean(plain) + 1e-15
     fitted = fw.result["map"]
+    from psa.design.fidelity import phase_profile                       # phase profile at the bottom
+    ph = fw.result["phase"]
+    assert fw.result["job"]["phase"]["m0"] == [0.0, 0.0, 1.0] and len(ph["offsets_hz"]) == 401
+    ref_ph = phase_profile(tab.start_pulse, np.linspace(-10e3, 10e3, 401), 1.0)
+    assert np.isclose(ph["tau_us"], ref_ph["tau_us"]) and "linear fit phase" in fw.phase_info.text()
+    assert len(fw.phase_curve.getData()[0]) == 401 and len(fw.phase_fit_curve.getData()[0]) == 401
     fw.set_correction(c["phi_deg"], c["tau_us"])           # fixed = the fitted values: the same map
     assert not fw.tau_spin.isHidden() and fw.max_delay_spin.isHidden()
     assert "fixed:" in fw.reference()[1]

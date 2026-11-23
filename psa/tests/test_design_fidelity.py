@@ -8,7 +8,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 from psa.design import metrics
-from psa.design.fidelity import infidelity_grid, run_job, summary
+from psa.design.fidelity import infidelity_grid, phase_profile, run_job, summary
 from psa.design.pulse import PulseSequence
 from psa.rotations import propagate_batch, quaternion_to_matrix
 
@@ -95,6 +95,34 @@ def test_freedom_fixed_and_fitted():
     for r in ({"kind": "own"}, {"kind": "PP", "m0": [0, 0, 1], "mt": [1, 0, 0]}):
         out = run_job(dict(job, reference=dict(r, freedom="linear", fit=True)))
         assert "error" not in out and np.mean(out["map"]) <= np.mean(run_job(dict(job, reference=r))["map"]) + 1e-15
+
+
+def test_phase_profile():
+    """A delay tau0 after the pulse adds a linear phase: the fitted delay grows by tau0 (in the convention of
+    the "linear phase" freedom), the residual stays the same; the fit removes it."""
+    a = pulse(60, seed=5)
+    n0 = 60                                                     # 30 µs free evolution
+    b = PulseSequence(np.r_[a.amplitude, np.zeros(n0)], np.r_[a.phase, np.zeros(n0)], DT, UMAX)
+    offs = np.linspace(-4e3, 4e3, 161)
+    pa, pb = phase_profile(a, offs, max_delay_us=200), phase_profile(b, offs, max_delay_us=200)
+    assert np.allclose(pa["mxy"], pb["mxy"]) and np.isclose(abs(pb["tau_us"] - pa["tau_us"]), 30.0, atol=1e-3)
+    assert np.allclose(pa["residual_deg"], pb["residual_deg"], atol=1e-6)
+    # the line is the "linear phase" freedom: with it fixed, PP z -> transverse direction at phi is exact
+    m0 = np.array([0, 0, 1.0])
+    ref = {"kind": "PP", "m0": m0, "mt": [1, 0, 0], "freedom": "linear", "fit": False,
+           "phi_deg": pb["phi_deg"], "tau_us": pb["tau_us"]}
+    job = {"id": 1, "pulse": [b.amplitude.tolist(), b.phase.tolist(), DT, UMAX], "reference": ref,
+           "map": None, "cut_offset": {"offsets_hz": offs.tolist(), "scale": 1.0}, "cut_amp": None,
+           "phase": {"offsets_hz": offs.tolist(), "scale": 1.0, "m0": [0, 0, 1], "max_delay_us": 200}}
+    r = run_job(job)
+    keep_z = infidelity_grid(b, offs, [1.0], {"kind": "PP", "m0": m0, "mt": [0, 0, 1]})[0]   # = (1 - mz) / 2
+    mxy, res = pb["mxy"], np.radians(pb["residual_deg"])
+    mz = 1 - 2 * keep_z
+    expected = ((mxy * np.cos(res) - 1) ** 2 + (mxy * np.sin(res)) ** 2 + mz ** 2) / 4
+    assert np.allclose(r["cut_offset"], expected, atol=1e-12)
+    assert np.allclose(r["phase"]["tau_us"], pb["tau_us"]) and np.allclose(r["phase"]["fit_deg"], pb["fit_deg"])
+    # the shown phase is continuous next to the line (no 360° jumps)
+    assert np.all(np.abs(np.diff(pb["phase_deg"])) < 180)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,8 @@ are either fitted on an area (the map's offset × amplitude grid, as the GRAPE o
 or fixed values (the correction actually applied in the experiment).
 
 A job (``run_job``) computes any of: the map over an offset × amplitude grid, a cut over offsets at a
-fixed amplitude, and a cut over amplitudes at a fixed offset. ``fidelity_worker`` runs jobs in a separate
+fixed amplitude, a cut over amplitudes at a fixed offset, and the phase profile of the transverse
+magnetization with its linear fit (``phase_profile``). ``fidelity_worker`` runs jobs in a separate
 process (the editor's window does not block, and it never touches running optimizations).
 """
 from __future__ import annotations
@@ -128,10 +129,30 @@ def summary(inf, thresholds=(1e-3, 1e-4, 1e-5)):
     return out
 
 
+def phase_profile(ps: PulseSequence, offsets_hz, scale=1.0, m0=(0, 0, 1), max_delay_us=0.0):
+    """Phase of the transverse magnetization R m0 vs. offset (at one amplitude scaling) and its linear fit
+    phase(offset) = phi + 360 offset tau, fitted like the "linear phase" freedom (weighted by |m_xy|; |tau| <=
+    max_delay_us, 0 = the pulse duration): tau is the delay a first-order phase correction removes.
+    Returns {"offsets_hz", "mxy" (|m_xy|), "phase_deg" (unwrapped, next to the line), "fit_deg" (the line),
+    "residual_deg" (phase - line, wrapped to ±180), "phi_deg", "tau_us"}."""
+    from psa.design.grape import fit_freedom
+    f = np.asarray(offsets_hz, float)
+    m = matrices(ps, f, [float(scale)])[0] @ _unit(m0)                      # (n_offsets, 3)
+    mx, my = m[:, 0], m[:, 1]
+    tau_max = max_delay_us * 1e-6 if max_delay_us > 0 else ps.duration
+    phi, tau = fit_freedom(mx, my, f, np.ones(len(f)), "linear", tau_max)
+    line = phi + 2 * np.pi * f * tau
+    resid = np.angle(np.exp(1j * (np.arctan2(my, mx) - line)))
+    return {"offsets_hz": f, "mxy": np.hypot(mx, my), "phase_deg": np.degrees(line + resid),
+            "fit_deg": np.degrees(line), "residual_deg": np.degrees(resid),
+            "phi_deg": float(np.degrees(np.angle(np.exp(1j * phi)))), "tau_us": tau * 1e6}
+
+
 def run_job(job):
     """job: {"id", "pulse": [amp, phase, dt, umax], "reference", "map": {"offsets_hz", "scales"} | None,
     "cut_offset": {"offsets_hz", "scale"} | None, "cut_amp": {"scales", "offset_hz"} | None,
-    "fit_area": {"offsets_hz", "scales"} (where a free correction is fitted; default: the map)}.
+    "fit_area": {"offsets_hz", "scales"} (where a free correction is fitted; default: the map),
+    "phase": {"offsets_hz", "scale", "m0", "max_delay_us"} | None (phase profile, see phase_profile)}.
     A UR / PP / own reference may hold "freedom" ("none" / "phase" / "linear") with either "fit": True (and
     "max_delay_us") or fixed "phi_deg" / "tau_us".
     Returns {"id", "map", "cut_offset", "cut_amp" (infidelity arrays or None), "correction" ({"phi_deg", "tau_us",
@@ -141,7 +162,7 @@ def run_job(job):
         amp, phase, dt, umax = job["pulse"]
         ps = PulseSequence(np.asarray(amp, float), np.asarray(phase, float), dt, umax)
         ref = dict(job.get("reference") or {"kind": "own"})
-        out = {"id": job["id"], "map": None, "cut_offset": None, "cut_amp": None, "correction": None}
+        out = {"id": job["id"], "map": None, "cut_offset": None, "cut_amp": None, "correction": None, "phase": None}
         R_map = None
         if ref.get("kind") == "points":
             if ref.get("freedom", "none") != "none":
@@ -176,6 +197,10 @@ def run_job(job):
         if job.get("cut_amp"):
             c = job["cut_amp"]
             out["cut_amp"] = infidelity_grid(ps, [c["offset_hz"]], c["scales"], ref)[:, 0]
+        if job.get("phase"):
+            c = job["phase"]
+            out["phase"] = phase_profile(ps, c["offsets_hz"], c.get("scale", 1.0), c.get("m0", (0, 0, 1)),
+                                         c.get("max_delay_us", 0.0))
         out["elapsed_s"] = time.time() - t0
         return out
     except Exception as e:

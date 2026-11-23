@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QF
                                QLabel, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
 from psa.design.fidelity import fidelity_worker, summary
-from psa.editor_gui.widgets import (ACCENT, BAD, GOOD, MUTED_FG, PANEL_BG, TEXT_FG, lock_heights, make_plot,
+from psa.editor_gui.widgets import (ACCENT, ACCENT_2, BAD, GOOD, MUTED_FG, PANEL_BG, TEXT_FG, lock_heights, make_plot,
                                     spawn_single_blas)
 
 QUANTITIES = ("log10(1 − F)", "F")
@@ -218,6 +218,29 @@ class FidelityPanel(QWidget):
         al.addWidget(self.cut_amp_plot)
         self.cut_amp_info = QLabel(""); al.addWidget(self.cut_amp_info)
         cl.addWidget(abox)
+        # ---- phase profile of the transverse magnetization
+        pbox = QGroupBox("Phase of the transverse magnetization vs. offset")
+        pbox.setToolTip("phase of the transverse part of R m0 (m0 = z, or the PP reference's m0) with its linear "
+                        "fit phase + 360° · offset · delay, fitted as the 'linear phase' freedom (weighted by the "
+                        "transverse magnitude): the delay is what a first-order phase correction removes. Below: "
+                        "the deviation from the line (gray where the transverse magnitude is below 0.5)")
+        pl = QVBoxLayout(pbox); pf = QFormLayout()
+        self.phase_check = QCheckBox("compute on Refresh"); self.phase_check.setChecked(True)
+        pf.addRow(self.phase_check)
+        self.phase_amp = _spin(0.0, 1e4, 100.0, 2, " %"); pf.addRow("amplitude:", self.phase_amp)
+        row, self.phase_range = _range_row(-10.0, 10.0, 401, " kHz", (-1e4, 1e4)); pf.addRow("offset:", row)
+        pl.addLayout(pf)
+        self.phase_plot = make_plot("phase [°]", "offset [kHz]"); self.phase_plot.setMinimumHeight(240)
+        self.phase_curve = self.phase_plot.plot(pen=pg.mkPen(ACCENT, width=2), connect="finite", name="phase")
+        self.phase_fit_curve = self.phase_plot.plot(pen=pg.mkPen(ACCENT_2, width=1.5, style=Qt.PenStyle.DashLine),
+                                                    name="linear fit")
+        pl.addWidget(self.phase_plot)
+        self.phase_dev_plot = make_plot("deviation [°]", "offset [kHz]"); self.phase_dev_plot.setMinimumHeight(180)
+        self.phase_dev_low = self.phase_dev_plot.plot(pen=pg.mkPen(MUTED_FG, width=1), connect="finite")
+        self.phase_dev_curve = self.phase_dev_plot.plot(pen=pg.mkPen(ACCENT, width=2), connect="finite")
+        pl.addWidget(self.phase_dev_plot)
+        self.phase_info = QLabel(""); self.phase_info.setWordWrap(True); pl.addWidget(self.phase_info)
+        cl.addWidget(pbox)
         cl.addStretch()
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(content)
         outer.addWidget(scroll, 1)
@@ -352,7 +375,15 @@ class FidelityPanel(QWidget):
             if scales[0] <= 0:
                 raise ValueError("amplitudes must be positive")
             job["cut_amp"] = {"scales": scales.tolist(), "offset_hz": self.cut_amp_off.value() * 1e3}
-        if not any(job[k] for k in ("map", "cut_offset", "cut_amp")):
+        job["phase"] = None
+        if self.phase_check.isChecked():
+            if self.phase_amp.value() <= 0:
+                raise ValueError("the phase profile's amplitude must be positive")
+            m0 = ref["m0"] if ref.get("kind") == "PP" else [0.0, 0.0, 1.0]
+            job["phase"] = {"offsets_hz": self._values(self.phase_range, 1e3).tolist(),
+                            "scale": self.phase_amp.value() / 100, "m0": list(map(float, m0)),
+                            "max_delay_us": float(ref.get("max_delay_us", 0.0) or 0.0)}
+        if not any(job[k] for k in ("map", "cut_offset", "cut_amp", "phase")):
             raise ValueError("nothing to compute: enable at least one plot")
         if ref.get("freedom", "none") != "none" and ref.get("kind") != "points" and ref.get("fit", True) \
                 and not job["map"]:                   # fit on the map ranges even if the map is not shown
@@ -477,10 +508,33 @@ class FidelityPanel(QWidget):
                 info.setText(self._stats(r[key]))
             else:
                 curve.setData([], []); info.setText("")
+        self._draw_phase(r)
         if r is not None and r["job"].get("cut_offset"):
             self.cut_off_plot.setTitle(f"at {r['job']['cut_offset']['scale'] * 100:g} %", color=MUTED_FG, size="9pt")
         if r is not None and r["job"].get("cut_amp"):
             self.cut_amp_plot.setTitle(f"at {r['job']['cut_amp']['offset_hz'] / 1e3:g} kHz", color=MUTED_FG, size="9pt")
+
+    def _draw_phase(self, r):
+        p = r.get("phase") if r is not None else None
+        if p is None:
+            for c in (self.phase_curve, self.phase_fit_curve, self.phase_dev_curve, self.phase_dev_low):
+                c.setData([], [])
+            self.phase_info.setText("")
+            return
+        x = np.asarray(p["offsets_hz"]) / 1e3
+        ok = np.asarray(p["mxy"]) >= 0.5                         # phase well defined
+        dev = np.asarray(p["residual_deg"], float)
+        self.phase_curve.setData(x, np.asarray(p["phase_deg"], float))
+        self.phase_fit_curve.setData(x, np.asarray(p["fit_deg"], float))
+        self.phase_dev_low.setData(x, dev)
+        self.phase_dev_curve.setData(x, np.where(ok, dev, np.nan))
+        m0 = r["job"]["phase"]["m0"]
+        stats = (f"deviation where |m_xy| ≥ 0.5: rms {np.sqrt(np.mean(dev[ok] ** 2)):.3g}°, max {np.max(np.abs(dev[ok])):.3g}°"
+                 if np.any(ok) else "the transverse magnitude is below 0.5 everywhere")
+        self.phase_info.setText(f"m0 = ({', '.join(f'{v:g}' for v in m0)}) at {r['job']['phase']['scale'] * 100:g} %: "
+                                f"linear fit phase {p['phi_deg']:.2f}° + 360° · offset · {p['tau_us']:.3f} µs "
+                                f"(delay {p['tau_us']:.3f} µs = the first-order phase correction); {stats}; "
+                                f"|m_xy| {np.min(p['mxy']):.3f} … {np.max(p['mxy']):.3f}")
 
     def _draw_map(self, r, label):
         fig = self.figure
