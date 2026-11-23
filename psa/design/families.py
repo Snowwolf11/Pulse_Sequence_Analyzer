@@ -1,7 +1,7 @@
 """Parametrized curve and pulse families for the editor.
 
 Curve families return points of a curve (any units); the editor converts them with
-``conversion.curve_to_ps``. Pulse families (2H, 4H) return the pulse sequence directly from the
+``conversion.curve_to_ps``. Pulse families (2H, 4H, 6H) return the pulse sequence directly from the
 closed-form construction (phase ramps), so no conversion is needed.
 """
 from __future__ import annotations
@@ -250,7 +250,164 @@ class FourHelix(Family):
         return PulseSequence(np.full(4 * n, 100.0), np.concatenate(ramps), dt, umax)
 
 
-FAMILIES = [Helix(), LissajousKnot(), TorusKnot(), CleliaCurve(), CustomCurve(), TwoHelix(), FourHelix()]
+# Solutions of the continuous 6H problem (loop B a closed 2H loop): (T_A, Omega_B / Omega_A, T_B, twist A -> B
+# in rad). Found by numerical continuation from the 6H pulse library (6H_Full_Derivation, T_A = 3.3 ... 4.6);
+# the branch ends in a fold at T_A ≈ 4.65. Used as starting points of the solve.
+SIX_H_TABLE = (
+    (3.18, 0.31677394, 5.88125475, -0.14832762),
+    (3.19, 0.34689011, 5.88134094, -0.15917521),
+    (3.20, 0.37304846, 5.88143718, -0.16754823),
+    (3.21, 0.39630722, 5.88154272, -0.17417659),
+    (3.22, 0.41733371, 5.88165700, -0.17950560),
+    (3.23, 0.43657914, 5.88177959, -0.18382710),
+    (3.24, 0.45436457, 5.88191014, -0.18734266),
+    (3.25, 0.47092756, 5.88204838, -0.19019713),
+    (3.26, 0.48644939, 5.88219405, -0.19249793),
+    (3.27, 0.50107194, 5.88234697, -0.19432674),
+    (3.28, 0.51490853, 5.88250696, -0.19574694),
+    (3.29, 0.52805131, 5.88267388, -0.19680853),
+    (3.30, 0.54057634, 5.88284759, -0.19755154),
+    (3.35, 0.59585520, 5.88381476, -0.19743864),
+    (3.40, 0.64218619, 5.88494014, -0.19241365),
+    (3.45, 0.68232469, 5.88621876, -0.18348138),
+    (3.50, 0.71788730, 5.88764825, -0.17100934),
+    (3.55, 0.74991511, 5.88922795, -0.15504575),
+    (3.60, 0.77912452, 5.89095829, -0.13545713),
+    (3.65, 0.80603402, 5.89284055, -0.11199904),
+    (3.70, 0.83103429, 5.89487660, -0.08435894),
+    (3.75, 0.85442979, 5.89706883, -0.05218534),
+    (3.80, 0.87646487, 5.89941999, -0.01510846),
+    (3.85, 0.89734086, 5.90193315, 0.02724669),
+    (3.90, 0.91722786, 5.90461169, 0.07525549),
+    (3.95, 0.93627300, 5.90745916, 0.12929835),
+    (4.00, 0.95460662, 5.91047934, 0.18977522),
+    (4.05, 0.97234698, 5.91367618, 0.25713068),
+    (4.10, 0.98960401, 5.91705376, 0.33188968),
+    (4.15, 1.00648258, 5.92061626, 0.41470571),
+    (4.20, 1.02308530, 5.92436801, 0.50642571),
+    (4.25, 1.03951542, 5.92831336, 0.60818069),
+    (4.30, 1.05587964, 5.93245676, 0.72152077),
+    (4.35, 1.07229151, 5.93680269, 0.84863174),
+    (4.40, 1.08887528, 5.94135563, 0.99271322),
+    (4.45, 1.10577104, 5.94612008, 1.15870875),
+    (4.50, 1.12314147, 5.95110052, 1.35491599),
+    (4.55, 1.14118152, 5.95630134, 1.59731920),
+    (4.60, 1.16013261, 5.96172692, 1.92628693),
+    (4.64, 1.17615466, 5.96623207, 2.37905204),
+)
+
+
+def two_helix_jump(T):
+    """Phase jump (rad) between the two ramps of a closed 2H loop with helix angle T (6H_curves.pdf)."""
+    nu = math.sqrt(-math.sin(T) / T)
+    return math.atan2(-2 * nu * math.sqrt(1 + nu ** 2) * math.sin(T), -(1 + (1 + 2 * nu ** 2) * math.cos(T)))
+
+
+class SixHelix(Family):
+    name = "6H (0° UR, 3rd-order robust)"
+    kind = "pulse"
+    description = ("Three closed 2H loops in the order A₁ B₁ B₂ A₂ C₁ C₂ as six phase ramps; the second half is the "
+                   "first shifted by 180° (C = B). Loop A: amplitude Ω_A, helix angle T_A, rate −Ω_A ν(T_A), "
+                   "ν = sqrt(−sin T / T); loop B: rate +Ω_B ν(T_B) with the 2H phase jump. Ω_B/Ω_A, T_B and the twist "
+                   "A → B are solved for A2 = A3 = 0 and the identity gate (A1 = 0 by closure). The sampled pulse is "
+                   "then polished on the sub-pulse grid, so it is exact as shown (~1 s). T_A ∈ (π, 4.65); "
+                   "shortest at T_A ≈ 4.15 (≈ 490 µs at 10 kHz).")
+    params = [Param("TA", "loop A angle T_A (shape)", 4.15, 3.18, 4.62, unit="rad"),
+              Param("amp", "max. amplitude", 100.0, 1.0, 100.0, unit="%"),
+              Param("phi0", "start phase φ0", 0.0, -180.0, 180.0, unit="°")]
+
+    def __init__(self):
+        self._cache = {}
+
+    @staticmethod
+    def _nu(T):
+        return math.sqrt(-math.sin(T) / T)
+
+    def _loops(self, TA, z):
+        """(B rate, B amplitude, B ramp duration, jump inside B, twist A -> B) from (Omega_B, T_B, twist), Omega_A = 1."""
+        oB, TB, j1 = z
+        nu = self._nu(TB)
+        return oB * nu, oB, TB / (oB * math.sqrt(1 + nu ** 2)), -two_helix_jump(TB), j1
+
+    def _pieces(self, TA, x):
+        """Continuous model (Omega_A = 1) as builder pieces."""
+        from psa.design.builder import Piece
+        rB, oB, tB, dB, j1 = x
+        nu = self._nu(TA)
+        rA, tA = -nu, TA / math.sqrt(1 + nu ** 2)
+        out = []
+        for half in (0, 1):
+            ph = -math.pi * half
+            for k, (O, r, t, jump) in enumerate(((1.0, rA, tA, j1), (oB, rB, tB, dB), (oB, rB, tB, 0.0))):
+                out.append(Piece(O, ph, r, t, 3 * half + k))
+                ph += r * t + jump
+        return out
+
+    def shape(self, TA):
+        """Continuous solution (B rate, B amplitude, B ramp duration, jump inside B, twist A -> B), Omega_A = 1."""
+        from scipy.optimize import least_squares
+        from psa.design.builder import CurveDesign
+        d = CurveDesign()
+
+        def residual(z):
+            p = self._pieces(TA, self._loops(TA, z))
+            rb, T = d.robustness(p), d.duration(p)
+            R = d.gate_matrix(p)
+            return np.r_[rb["A1"] / T, rb["A2"] / T ** 2, rb["A3"] / T ** 3, R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]]
+
+        if not math.pi < TA < 2 * math.pi:
+            raise ValueError("T_A must lie in (π, 2π)")
+        table = np.array(SIX_H_TABLE)
+        for i in np.argsort(np.abs(table[:, 0] - TA))[:3]:          # nearest seeds first
+            sol = least_squares(residual, table[i, 1:], xtol=1e-15, ftol=1e-15, gtol=1e-15)
+            if np.linalg.norm(sol.fun) < 1e-11 and sol.x[0] > 0 and math.pi < sol.x[1] < 2 * math.pi:
+                return np.array(self._loops(TA, sol.x))
+        raise ValueError(f"no 6H solution found for T_A = {TA:.4f} (the family ends at T_A ≈ 4.65)")
+
+    @staticmethod
+    def _sample(y, nA, nB, dt, umax, phi0_rad):
+        OA, rA, OB, rB, dB, j1 = y
+        Om = 2 * math.pi * umax
+        amp, ph = [], []
+        for half in (0, 1):
+            p = phi0_rad - math.pi * half
+            for O, r, n, jump in ((OA, rA, nA, j1), (OB, rB, nB, dB), (OB, rB, nB, 0.0)):
+                amp.append(np.full(n, O / Om * 100.0))
+                ph.append(p + r * dt * (np.arange(n) + 0.5))
+                p += r * n * dt + jump
+        return PulseSequence(np.concatenate(amp), np.degrees(np.concatenate(ph)), dt, umax)
+
+    def pulse(self, values, dt, umax):
+        from scipy.optimize import least_squares
+        from psa.design.metrics import analyze
+        v = self.check(values)
+        key = (round(v["TA"], 12), round(v["amp"], 12), dt, umax)
+        if key not in self._cache:
+            rB, oB, tB, dB, j1 = self.shape(v["TA"])
+            OA = 2 * math.pi * umax * v["amp"] / 100.0 / max(1.0, oB)      # the larger loop gets the max. amplitude
+            nu = self._nu(v["TA"])
+            tA, tBs = v["TA"] / math.sqrt(1 + nu ** 2) / OA, tB / OA
+            nA, nB = max(2, math.ceil(tA / dt - 1e-9)), max(2, math.ceil(tBs / dt - 1e-9))   # rounding up lowers the amplitudes
+            base = np.array([OA * tA / (nA * dt), -OA * nu * tA / (nA * dt),
+                             oB * OA * tBs / (nB * dt), rB * OA * tBs / (nB * dt), 1.0, 1.0])
+            y0 = np.array([1.0, 1.0, 1.0, 1.0, dB, j1])
+
+            def residual(y):                      # exact metrics of the sampled pulse
+                ps = self._sample(y * base, nA, nB, dt, umax, 0.0)
+                a = analyze(ps, b1=False)
+                rb, T = a["robustness"], ps.duration
+                return np.r_[rb["A1"] / T, rb["A2"] / T ** 2, rb["A3"] / T ** 3, a["gate"]["quaternion"][1:]]
+
+            sol = least_squares(residual, y0, method="lm", xtol=1e-14, ftol=1e-14, gtol=1e-14)
+            y = sol.x if np.linalg.norm(sol.fun) < np.linalg.norm(residual(y0)) else y0
+            if len(self._cache) > 64:
+                self._cache.clear()
+            self._cache[key] = (y * base, nA, nB)
+        y, nA, nB = self._cache[key]
+        return self._sample(y, nA, nB, dt, umax, math.radians(v["phi0"]))
+
+
+FAMILIES = [Helix(), LissajousKnot(), TorusKnot(), CleliaCurve(), CustomCurve(), TwoHelix(), FourHelix(), SixHelix()]
 
 
 def family_by_name(name) -> Family:

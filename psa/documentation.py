@@ -113,8 +113,11 @@ Amplitude and phase plots over time with keyframes.
 Curve families tab
 Choose a family and change its parameters (slider or number). Curve families (helix, Lissajous knot,
 torus knot, Clelia curve, custom formula) are converted exactly into a pulse; the duration is the shortest
-possible (full amplitude) or fixed. Pulse families (2H, 4H) are generated directly from their closed-form
-construction. "calculate pulse sequence live" can be switched off for slow families: then only the curve
+possible (full amplitude) or fixed. Pulse families (2H, 4H, 6H) are generated directly from their phase-ramp
+construction. 6H (identity, robust to third order in the offset): three closed 2H loops A B B | A B B, the
+second half shifted by 180°; you choose the shape T_A (loop A's helix angle, π < T_A < 4.65, shortest near
+4.15), the maximum amplitude and the start phase; loop B and the twist are solved, and the sampled pulse is
+polished on the sub-pulse grid (about 1 s), so A1 = A2 = A3 = 0 and the identity hold for the pulse as shown. "calculate pulse sequence live" can be switched off for slow families: then only the curve
 is drawn until you click "Calculate now". The custom family accepts formulas in u with parameters a–d.
 
 Curve builder tab

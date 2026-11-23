@@ -172,7 +172,8 @@ def test_families_tab():
     w = make_window()
     tab = w.families_tab
     w.show_tab(tab)
-    for name in ("Helix", "Torus knot", "Custom (formula)", "2H (closed two-helix loop)", "4H (0° UR, 2nd-order robust)"):
+    for name in ("Helix", "Torus knot", "Custom (formula)", "2H (closed two-helix loop)", "4H (0° UR, 2nd-order robust)",
+                 "6H (0° UR, 3rd-order robust)"):
         tab.family_box.setCurrentText(name)
         tab._timer.stop()
         ps = tab.compute()

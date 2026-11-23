@@ -10,7 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 from psa.design import metrics
 from psa.design.conversion import curve_to_ps, ps_to_curve
-from psa.design.families import FAMILIES, CustomCurve, FourHelix, TwoHelix, compile_expression, family_by_name
+from psa.design.families import (FAMILIES, CustomCurve, FourHelix, SixHelix, TwoHelix, compile_expression,
+                                 family_by_name)
 
 DT, UMAX = 0.5e-6, 1e4
 
@@ -72,6 +73,35 @@ def test_four_helix_closure_condition():
     p = FourHelix.phase_rate(Omega, tau)
     w = math.sqrt(Omega ** 2 + p ** 2)
     assert abs(Omega ** 2 * math.sin(tau * w) + tau * p ** 2 * w) < 1e-6 * Omega ** 2
+
+
+def test_six_helix_reproduces_library_shape():
+    """At T_A = 3.3 the solve gives the 6H library pulse 1 (Omega_B/Omega_A = 0.540576, T_B = 5.882848)."""
+    rB, oB, tB, dB, j1 = SixHelix().shape(3.3)
+    nu = rB / oB
+    assert abs(oB - 0.5405763) < 1e-6 and abs(tB * oB * math.sqrt(1 + nu ** 2) - 5.8828476) < 1e-6
+    try:
+        SixHelix().shape(5.2)                       # beyond the fold of the branch
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected no closed-2H 6H solution at T_A = 5.2")
+
+
+def test_six_helix_is_third_order_robust_identity_on_the_grid():
+    fam = SixHelix()
+    for values, dt, umax in (({"TA": 4.15}, DT, UMAX), ({"TA": 3.5, "amp": 60.0, "phi0": 40.0}, DT, UMAX),
+                             ({"TA": 4.5}, 1e-6, 2e4)):
+        ps = fam.pulse(values, dt, umax)
+        a = metrics.analyze(ps, b1=False)
+        rb = a["robustness"]
+        assert max(rb["A1_norm"], rb["A2_norm"], rb["A3_norm"]) < 1e-12, (values, rb)
+        assert a["gate"]["angle_deg"] < 1e-9, (values, a["gate"]["angle_deg"])
+        assert ps.amplitude.max() <= fam.check(values)["amp"] + 1e-9
+        assert abs(ps.phase[0] - fam.check(values)["phi0"]) < 90            # starts near φ0 (half a sub-pulse in)
+    # shortest member: ≈ 490 µs at 10 kHz; φ0 only shifts the phases
+    ps0, ps1 = fam.pulse({"TA": 4.15}, DT, UMAX), fam.pulse({"TA": 4.15, "phi0": 30.0}, DT, UMAX)
+    assert 480e-6 < ps0.duration < 500e-6 and np.allclose(ps1.phase - ps0.phase, 30.0)
 
 
 def test_custom_expressions():

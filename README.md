@@ -340,7 +340,7 @@ left and a live panel on the right; its **Help** button explains everything in d
 |---|---|
 | Text | Write the pulse with the `R(...)` / `PR(...)` syntax (see below). |
 | Waveform | Draw amplitude and phase over time with draggable keyframes (linear or hold between them). |
-| Curve families | Pick a family (helix, Lissajous knot, torus knot, Clelia curve, custom formula, 2H, 4H) and change its parameters live. |
+| Curve families | Pick a family (helix, Lissajous knot, torus knot, Clelia curve, custom formula, 2H, 4H, 6H) and change its parameters live. The 6H family is an identity pulse robust to third order in the offset. |
 | Curve builder | Compose the error curve from lines, arcs, helices and Bézier segments with a twist (phase jump) at each junction; edit in 3D and in three projections. |
 | Import curve | Load curve points (x, y, z) or a curvature/torsion table from a CSV / text file. |
 | Optimize (GRAPE) | Optimize every sub-pulse of a start pulse with exact gradients: local robustness (detuning orders and B1 at chosen offsets, as in SCQC) or classical broadband GRAPE, with a UR or PP gate goal. |
