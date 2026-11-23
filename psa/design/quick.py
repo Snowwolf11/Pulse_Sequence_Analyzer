@@ -4,6 +4,9 @@ The recipe is the winner of the quick-settings study (studies/quick_settings_stu
 268 runs; report: studies/quick_settings_report.py):
 
     robustness   broadband grid over the band, 2 points per 1/T (T = duration), no Lawson reweighting
+    B1 (optional, not part of the study; by analogy) an amplitude range s_lo..s_hi shifts the nutation frequency
+                 by (s - 1) nu_rf, a frequency like an offset: the same density on that axis, i.e.
+                 n_B1 = round(2 (s_hi - s_lo) nu_rf T) + 1 (at least 3) B1 values, every offset with every one
     controls     cubic splines, one control point per 6 µs, smoothness weight 1e-6
     limits       amplitude rate / phase rate as soft limits, switched on only in a last stage
     exploration  22 starts (mix of perturbed and random, spread 1.0, noise correlation 5 % of T),
@@ -11,7 +14,8 @@ The recipe is the winner of the quick-settings study (studies/quick_settings_stu
 
 Driver (QuickRun, like the study's emulated quick mode): the Search tasks run in slices of a few
 evaluations, so the run can follow a wall-clock budget. Every slice is scored on a fine test grid (401
-offsets over the band). After 80 % of the budget (or when the search is over) the 3 best pulses without
+offsets over the band; with a B1 range: 201 offsets x 4 times the B1 density, the worst value of the
+area decides). After 80 % of the budget (or when the search is over) the 3 best pulses without
 the limits are re-optimized with the limits (the "limits" stage) for the rest of the time. The result is
 the pulse with the smallest worst-case infidelity on the test grid among those that keep the rate limits
 (5 % tolerance); if none does, the best one overall (flagged).
@@ -31,21 +35,41 @@ from psa.design.optimize import SolverSettings
 from psa.design.pulse import PulseSequence
 
 RECIPE = dict(density=2.0, spline_us=6.0, smooth_weight=1e-6, n_starts=22, start_pool="mix", spread=1.0,
-              correlation=0.05, screen_rounds=1, screen_nfev=30, keep_fraction=0.33, n_kicks=0, max_nfev=3000)
+              correlation=0.05, screen_rounds=1, screen_nfev=30, keep_fraction=0.33, n_kicks=0, max_nfev=3000,
+              b1_density=2.0)
 DEFAULT_LIMITS = dict(max_amp_rate=20.0, max_phase_rate_khz=50.0)
 ACCEPT = 1.05                    # a result may exceed the rate limits by 5 %
 CHUNK = 20                       # evaluations per slice
 POLISH = 0.2                     # last fraction of the budget: the best free pulses get the limits
 K_POLISH = 3
 TEST_POINTS = 401
+TEST_POINTS_B1 = 201             # test offsets when a B1 range is optimized (times the B1 test values)
+B1_TEST_FACTOR = 4               # B1 test values per optimization B1 interval
+
+
+def b1_count(b1_range, umax_hz, duration_s, density=None):
+    """Number of B1 values of the quick recipe for an amplitude range (scales); 1 if the range is empty."""
+    lo, hi = float(b1_range[0]), float(b1_range[1])
+    if hi - lo <= 0:
+        return 1
+    d = RECIPE["b1_density"] if density is None else float(density)
+    return max(3, int(round(d * (hi - lo) * float(umax_hz) * duration_s)) + 1)
 
 
 def quick_config(duration_s, band_hz=(-1e4, 1e4), gate="UR", target_axis=(1, 0, 0), target_angle_deg=180.0,
-                 m0=(0, 0, 1), m_target=(1, 0, 0), max_amp_rate=20.0, max_phase_rate_khz=50.0, seed=0, dt=None):
-    """(GrapeConfig, SolverSettings) of the quick recipe for a pulse of ``duration_s`` over ``band_hz``."""
+                 m0=(0, 0, 1), m_target=(1, 0, 0), max_amp_rate=20.0, max_phase_rate_khz=50.0, seed=0, dt=None,
+                 b1_range=(1.0, 1.0), umax_hz=None, b1_density=None):
+    """(GrapeConfig, SolverSettings) of the quick recipe for a pulse of ``duration_s`` over ``band_hz`` and,
+    optionally, the amplitude (B1) scalings ``b1_range`` (1 = nominal; needs the rf amplitude ``umax_hz``)."""
     lo, hi = float(band_hz[0]), float(band_hz[1])
     if not hi > lo:
         raise ValueError("the band must have upper > lower offset")
+    s_lo, s_hi = float(b1_range[0]), float(b1_range[1])
+    if not (0 < s_lo <= s_hi):
+        raise ValueError("the B1 range needs 0 < lower <= upper")
+    if s_hi > s_lo and not (umax_hz and umax_hz > 0):
+        raise ValueError("a B1 range needs the rf amplitude (umax_hz)")
+    n_b1 = b1_count((s_lo, s_hi), umax_hz or 0.0, duration_s, b1_density)
     if gate not in ("UR", "PP"):
         raise ValueError("quick mode needs a gate goal (UR or PP)")
     us = duration_s * 1e6
@@ -62,6 +86,8 @@ def quick_config(duration_s, band_hz=(-1e4, 1e4), gate="UR", target_axis=(1, 0, 
                       noise_correlation_us=RECIPE["correlation"] * us, screen_rounds=RECIPE["screen_rounds"],
                       screen_nfev=RECIPE["screen_nfev"], keep_fraction=RECIPE["keep_fraction"],
                       n_kicks=RECIPE["n_kicks"], crossover_rate=0.0, coarse_levels=[])
+    if n_b1 > 1:
+        cfg.bb_scale_min, cfg.bb_scale_max, cfg.bb_scale_n = s_lo, s_hi, n_b1
     cfg.check()
     # "solved" at gate infidelity 1e-8, as in the study (the GRAPE default is stricter)
     return cfg, SolverSettings(max_nfev=RECIPE["max_nfev"], gate_infidelity_tolerance=1e-8)
@@ -79,6 +105,9 @@ class QuickRun:
                  clock=time.time, chunk=CHUNK, polish=POLISH, k_polish=K_POLISH):
         self.ps, self.cfg, self.st = ps, config, settings
         self.band = (float(config.bb_offset_min_hz), float(config.bb_offset_max_hz), TEST_POINTS)
+        if int(config.bb_scale_n) > 1 and config.bb_scale_max > config.bb_scale_min:     # B1 range: the area
+            self.band = (self.band[0], self.band[1], TEST_POINTS_B1, float(config.bb_scale_min),
+                         float(config.bb_scale_max), B1_TEST_FACTOR * (int(config.bb_scale_n) - 1) + 1)
         self.budget = float(budget_s)
         self.clock, self.chunk, self.k_polish = clock, int(chunk), int(k_polish)
         self.t0 = clock()

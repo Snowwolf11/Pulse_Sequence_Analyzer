@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 from psa.design.grape import band_quality, pulse_rates, run_task
 from psa.design.pulse import PulseSequence
-from psa.design.quick import QuickRun, quick_config, rectangular_start
+from psa.design.quick import QuickRun, b1_count, quick_config, rectangular_start
 
 DT, UMAX = 0.5e-6, 1e4
 
@@ -85,6 +85,36 @@ def test_quick_run_stop_keeps_the_best_so_far():
     assert q.done and q.stopped and q.tasks() == []
     pulse, s = q.best()
     assert pulse.N == 200 and s["slices"] == 22
+
+
+def test_quick_b1_range():
+    """B1 range: the offsets of the recipe times n_B1 = 2 (s_hi - s_lo) nu_rf T + 1 (>= 3) scalings; the run is
+    scored on the area. Without a range the config is the plain recipe."""
+    plain = quick_config(450e-6, (-1e4, 1e4), dt=DT)[0]
+    same = quick_config(450e-6, (-1e4, 1e4), dt=DT, b1_range=(1.0, 1.0), umax_hz=UMAX)[0]
+    assert plain.to_dict() == same.to_dict() and plain.bb_scale_n == 1
+    assert b1_count((0.8, 1.2), UMAX, 450e-6) == 5 and b1_count((0.95, 1.05), UMAX, 100e-6) == 3
+    assert b1_count((1.0, 1.0), UMAX, 450e-6) == 1
+    cfg = quick_config(450e-6, (-1e4, 1e4), dt=DT, b1_range=(0.8, 1.2), umax_hz=UMAX)[0]
+    assert (cfg.bb_offset_n, cfg.bb_scale_min, cfg.bb_scale_max, cfg.bb_scale_n) == (19, 0.8, 1.2, 5)
+    assert len(cfg.ensemble()) == 95
+    for bad in (dict(b1_range=(1.2, 0.8), umax_hz=UMAX), dict(b1_range=(0.8, 1.2)), dict(b1_range=(0.0, 1.0), umax_hz=UMAX)):
+        try:
+            quick_config(100e-6, dt=DT, **bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad}")
+    T = 100e-6
+    cfg, st = quick_config(T, (-4e3, 4e3), "UR", (1, 0, 0), 90.0, dt=DT, b1_range=(0.9, 1.1), umax_hz=UMAX)
+    clock = [0.0]
+    q = QuickRun(rectangular_start(T, DT, UMAX), cfg, st, budget_s=4.0, parallel=11, clock=lambda: clock[0], chunk=5)
+    assert q.band == (-4e3, 4e3, 201, 0.9, 1.1, 9)
+    _drive(q, clock, 1.0)
+    pulse, s = q.best()
+    b = band_quality(pulse, cfg, *q.band)
+    assert abs(b["worst infidelity"] - s["band"]["worst infidelity"]) < 1e-12 and "worst at B1 [%]" in b
+    nominal = band_quality(pulse, cfg, -4e3, 4e3, 201)
+    assert b["worst infidelity"] >= nominal["worst infidelity"] - 1e-15    # the area contains the nominal line
 
 
 if __name__ == "__main__":

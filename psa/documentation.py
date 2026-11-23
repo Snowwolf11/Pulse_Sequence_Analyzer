@@ -99,7 +99,12 @@ Shared panel (right)
   (default: the gate goal of the GRAPE tab while it optimizes or is shown, else the pulse's own gate at
   0 kHz / 100 % as in the panel), or fixed: the own gate, the GRAPE gate goal, or a UR rotation (angle,
   axis) / PP transfer (m0 → target) set in the window (prefilled from the GRAPE goal). The line below the
-  choice and the status after Refresh name the reference used. Shown as log10(1 − F) or F,
+  choice and the status after Refresh name the reference used. Freedom (own / UR / PP reference): judge
+  the pulse only up to a z-rotation after it, a free phase or a linear phase (phase + delay, removable by a
+  first-order phase correction or a delay), either fitted on the map's offset × amplitude range (the best
+  correction there; also used for the cuts) or fixed values (the correction applied in the experiment, e.g.
+  from the GRAPE status). With the GRAPE goal the GRAPE tab's freedom is used, fitted at its points. The
+  status after Refresh shows the phase and delay used. Shown as log10(1 − F) or F,
   with worst / mean infidelity and the fraction below 1e-3 / 1e-4 / 1e-5. Not live: Refresh takes the
   current pulse and computes in a separate process (the window does not block and does not interfere with
   a running optimization; a new Refresh replaces a running one). A note appears when the pulse changed.
@@ -180,7 +185,27 @@ like classical GRAPE. The duration and the number of sub-pulses stay those of th
   offsets) that keeps the rate limits (5 % tolerance); the status shows its worst / mean infidelity and
   rates. Stop ends early and keeps the best so far. Tuned for UR gates over ±10 kHz at 10 kHz rf (in
   the study: 3–4e-4 worst infidelity for 410–450 µs, 2e-5 for 180° in 600 µs, in 20 min; most of it
-  within the first few minutes). Mode "expert" shows all the settings below.
+  within the first few minutes). Optional B1 range (from–to %, 100 to 100 = off): the pulse should work
+  over that amplitude range too. The offsets are then combined with n_B1 = 2 (s_max − s_min) · rf · T + 1
+  (at least 3) amplitude scalings (the offset rule applied to the shift (s − 1) · rf of the nutation
+  frequency), and the run is scored on 201 offsets × 4 times as many B1 values (the worst value of the area
+  decides; the status shows where it is). Each evaluation is ~n_B1 times slower, so a longer budget helps
+  (the line below the range shows the point count). The B1 rule is not yet part of the study
+  (studies/quick_b1_study.py checks it).
+  Output folder (optional for a single pulse): the result is saved as
+  pulse_{µs}_{goal}_{range}_{index}.bruker, e.g. pulse_0550us_UR235-180_off20_B140_2.bruker: duration
+  rounded to µs (4 digits); the goal most points have, UR{axis}-{angle} or PP{m0}-{target} with vectors as
+  single digits (the smallest integer direction within 0.5°, "m" = minus: 0m10 = −y; angle in whole
+  degrees); off{offset range width in kHz}_B1{B1 range width in %} (rounded to 0.1, "p" for the
+  decimal point: off7p5); index = the first one that does not
+  overwrite an existing file. All numbers rounded half up.
+  Series ("series to … , n pulses"): a pulse library, one quick run per duration (evenly spaced, rounded to
+  µs); the time is the total, split in proportion to the durations. The pulses go into a new folder named
+  like a single pulse with the duration range (pulse_0100-0600us_UR235-180_off20_B140_1/) as
+  pulse_0405us.bruker, plus library.json with the settings and the score of every pulse (written after
+  each one). Stop ends the series after saving the current pulse (best so far). "Library…" opens the
+  library window: worst / mean infidelity vs. duration and a table; a click on a row loads that pulse;
+  "Open library…" shows an existing library folder. Mode "expert" shows all the settings below.
 - Start pulse: the current pulse of another tab, a rectangular pulse (duration, amplitude, phase) or a
   random one (duration, seed); "Load start pulse". "Result → start" continues from the result.
 - Points and goals: the goals hold at a set of points (offset, B1 scaling, weight).
@@ -268,7 +293,9 @@ like classical GRAPE. The duration and the number of sub-pulses stay those of th
 - Start noise: a tiny random change of the first start (seeded). An exactly symmetric start, e.g. a
   constant phase, can otherwise keep the optimizer in a symmetric family of pulses that cannot reach the goal.
 The optimizer (Levenberg–Marquardt with exact Jacobians) runs in the background (Optimize / Stop); the plots
-show the start (dashed), the best pulse so far and the goal residual vs. evaluations. Stopping rules (the
+show the start (dashed), the best pulse so far and the goal residual vs. evaluations. Stop asks the workers for
+their best pulse and waits up to 10 s; if none returns in time (e.g. a busy machine), the best pulse shown so
+far is kept. Stopping rules (the
 evaluation limit counts per candidate), "solved" thresholds and goal weights are the shared solver settings
 ("Settings…"; the finite-difference step is not used: the gradients are exact).
 If all starts and kicks converge to about the same residual without reaching the goals, the pulse is most

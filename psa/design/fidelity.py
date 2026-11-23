@@ -10,6 +10,10 @@ Infidelity 1 - F, computed from the residual (no cancellation for small values):
                the goal of its nearest point (NaN where that point has no goal); with freedom (free phase /
                linear phase) the targets are rotated by the z-rotation fitted at the points
     PP         1 - (1 + (R m0) . mt) / 2 = |R m0 - mt|^2 / 4
+Freedom (UR / PP / own): the reference may hold only up to a z-rotation after the pulse, theta = phi + 2 pi
+offset tau ("phase": tau = 0; "linear": phase + delay, removable by a phase correction / a delay). phi and tau
+are either fitted on an area (the map's offset × amplitude grid, as the GRAPE optimizer fits them at its points)
+or fixed values (the correction actually applied in the experiment).
 
 A job (``run_job``) computes any of: the map over an offset × amplitude grid, a cut over offsets at a
 fixed amplitude, and a cut over amplitudes at a fixed offset. ``fidelity_worker`` runs jobs in a separate
@@ -42,37 +46,74 @@ def matrices(ps, offsets_hz, scales):
     return quaternion_to_matrix(q.reshape(-1, 4)).reshape(sc.shape + (3, 3))
 
 
-def infidelity_grid(ps: PulseSequence, offsets_hz, scales, reference=None):
-    """1 - F at every (scale, offset): array (len(scales), len(offsets_hz))."""
+def _points_config(ref):
+    from psa.design.grape import GrapeConfig
+    return GrapeConfig(mode="broadband", gate=ref.get("gate", "none"), target_axis=ref.get("axis", [1, 0, 0]),
+                       target_angle_deg=ref.get("angle", 180.0), m0=ref.get("m0", [0, 0, 1]),
+                       m_target=ref.get("mt", [1, 0, 0]), points=ref["points"], freedom=ref.get("freedom", "none"),
+                       max_delay_us=ref.get("max_delay_us", 0.0))
+
+
+def resolve(ps: PulseSequence, reference=None):
+    """The reference with the pulse-dependent parts filled in: "own" gets its matrix "R"."""
     ref = dict(reference or {"kind": "own"})
-    kind = ref.get("kind", "own")
-    if kind == "points":                     # per-point goals of the GRAPE tab: the nearest point's goal
-        from psa.design.grape import GrapeConfig, goal_infidelity_grid
-        cfg = GrapeConfig(mode="broadband", gate=ref.get("gate", "none"), target_axis=ref.get("axis", [1, 0, 0]),
-                          target_angle_deg=ref.get("angle", 180.0), m0=ref.get("m0", [0, 0, 1]),
-                          m_target=ref.get("mt", [1, 0, 0]), points=ref["points"], freedom=ref.get("freedom", "none"),
-                          max_delay_us=ref.get("max_delay_us", 0.0))
-        return goal_infidelity_grid(ps, cfg, offsets_hz, scales)
-    R = matrices(ps, offsets_hz, scales)
-    if kind == "own":
-        ref = {"kind": "own", "R": matrices(ps, [0.0], [1.0])[0, 0]}
-    return infidelity_from_matrices(R, ref)
+    if ref.get("kind", "own") == "own" and "R" not in ref:
+        ref["R"] = matrices(ps, [0.0], [1.0])[0, 0]
+    return ref
 
 
-def infidelity_from_matrices(R, reference):
-    """1 - F of rotation matrices R (..., 3, 3) for a reference dict (UR / PP; "own" with its matrix "R")."""
-    ref = dict(reference)
+def infidelity_grid(ps: PulseSequence, offsets_hz, scales, reference=None):
+    """1 - F at every (scale, offset): array (len(scales), len(offsets_hz)). A UR / PP / own reference may carry
+    a z-rotation after the pulse: "phi" [rad] and "tau" [s] (see fit_correction)."""
+    ref = dict(reference or {"kind": "own"})
+    if ref.get("kind", "own") == "points":   # per-point goals of the GRAPE tab: the nearest point's goal
+        from psa.design.grape import goal_infidelity_grid
+        return goal_infidelity_grid(ps, _points_config(ref), offsets_hz, scales)
+    return infidelity_from_matrices(matrices(ps, offsets_hz, scales), resolve(ps, ref), offsets_hz)
+
+
+def _target(ref):
+    """(Rt, m0, mt) of a UR / own / PP reference (Rt None for PP)."""
     kind = ref.get("kind", "own")
     if kind == "PP":
-        m = R @ _unit(ref.get("m0", (0, 0, 1)))
-        return np.sum((m - _unit(ref.get("mt", (1, 0, 0)))) ** 2, axis=-1) / 4
+        return None, _unit(ref.get("m0", (0, 0, 1))), _unit(ref.get("mt", (1, 0, 0)))
     if kind == "UR":
-        Rt = rotation_from_axis_angle(_unit(ref.get("axis", (1, 0, 0))), float(ref.get("angle", 180.0)))
-    elif kind == "own" and "R" in ref:
-        Rt = np.asarray(ref["R"], float)
-    else:
-        raise ValueError(f"unknown reference {kind!r}")
+        return rotation_from_axis_angle(_unit(ref.get("axis", (1, 0, 0))), float(ref.get("angle", 180.0))), None, None
+    if kind == "own" and "R" in ref:
+        return np.asarray(ref["R"], float), None, None
+    raise ValueError(f"unknown reference {kind!r}")
+
+
+def infidelity_from_matrices(R, reference, offsets_hz=None):
+    """1 - F of rotation matrices R (..., n_offsets, 3, 3) for a reference dict (UR / PP; "own" with its matrix
+    "R"), optionally up to the z-rotation phi + 2 pi offset tau after the pulse ("phi" [rad], "tau" [s])."""
+    ref = dict(reference)
+    Rt, m0, mt = _target(ref)
+    phi, tau = float(ref.get("phi", 0.0)), float(ref.get("tau", 0.0))
+    if phi or tau:
+        from psa.design.grape import rz
+        if tau and offsets_hz is None:
+            raise ValueError("a linear phase needs the offsets")
+        f = np.zeros(1) if offsets_hz is None else np.asarray(offsets_hz, float)
+        Z = rz(phi + 2 * np.pi * f * tau)                                   # (n_offsets, 3, 3)
+        Rt, mt = (None, Z @ mt) if Rt is None else (Z @ Rt, None)
+    if Rt is None:
+        return np.sum((R @ m0 - mt) ** 2, axis=-1) / 4
     return np.sum((R - Rt) ** 2, axis=(-2, -1)) / 12
+
+
+def fit_correction(ps: PulseSequence, reference, offsets_hz, scales, freedom, max_delay_us=0.0, R=None):
+    """(phi [rad], tau [s]) of the best z-rotation after the pulse on the offset × amplitude area (equal weights;
+    tau = 0 for "phase"; |tau| <= max_delay_us, 0 = the pulse duration). R: the area's matrices if known."""
+    from psa.design.grape import _overlaps, fit_freedom
+    ref = resolve(ps, reference)
+    Rt, m0, mt = _target(ref)
+    if R is None:
+        R = matrices(ps, offsets_hz, scales)
+    a, b = _overlaps(R, ("PP", None, m0, mt) if Rt is None else ("UR", Rt, None, None))
+    f = np.broadcast_to(np.asarray(offsets_hz, float), a.shape)
+    tau_max = max_delay_us * 1e-6 if max_delay_us > 0 else ps.duration
+    return fit_freedom(a.ravel(), b.ravel(), f.ravel(), np.ones(a.size), freedom, tau_max)
 
 
 def summary(inf, thresholds=(1e-3, 1e-4, 1e-5)):
@@ -89,17 +130,46 @@ def summary(inf, thresholds=(1e-3, 1e-4, 1e-5)):
 
 def run_job(job):
     """job: {"id", "pulse": [amp, phase, dt, umax], "reference", "map": {"offsets_hz", "scales"} | None,
-    "cut_offset": {"offsets_hz", "scale"} | None, "cut_amp": {"scales", "offset_hz"} | None}.
-    Returns {"id", "map", "cut_offset", "cut_amp" (infidelity arrays or None), "elapsed_s"} or {"id", "error"}."""
+    "cut_offset": {"offsets_hz", "scale"} | None, "cut_amp": {"scales", "offset_hz"} | None,
+    "fit_area": {"offsets_hz", "scales"} (where a free correction is fitted; default: the map)}.
+    A UR / PP / own reference may hold "freedom" ("none" / "phase" / "linear") with either "fit": True (and
+    "max_delay_us") or fixed "phi_deg" / "tau_us".
+    Returns {"id", "map", "cut_offset", "cut_amp" (infidelity arrays or None), "correction" ({"phi_deg", "tau_us",
+    "source"} or None), "elapsed_s"} or {"id", "error"}."""
     t0 = time.time()
     try:
         amp, phase, dt, umax = job["pulse"]
         ps = PulseSequence(np.asarray(amp, float), np.asarray(phase, float), dt, umax)
-        ref = job.get("reference")
-        out = {"id": job["id"], "map": None, "cut_offset": None, "cut_amp": None}
+        ref = dict(job.get("reference") or {"kind": "own"})
+        out = {"id": job["id"], "map": None, "cut_offset": None, "cut_amp": None, "correction": None}
+        R_map = None
+        if ref.get("kind") == "points":
+            if ref.get("freedom", "none") != "none":
+                from psa.design.grape import fitted_freedom
+                phi, tau = fitted_freedom(ps, _points_config(ref))
+                out["correction"] = {"phi_deg": np.degrees(phi), "tau_us": tau * 1e6, "source": "fitted at the GRAPE points"}
+        elif ref.get("freedom", "none") != "none":
+            ref = resolve(ps, ref)
+            if ref.get("fit", True):
+                area = job.get("fit_area") or job.get("map")
+                if not area:
+                    raise ValueError("fitting the correction needs an area (the map ranges)")
+                if job.get("map") and area is job.get("map"):
+                    R_map = matrices(ps, area["offsets_hz"], area["scales"])
+                phi, tau = fit_correction(ps, ref, area["offsets_hz"], area["scales"], ref["freedom"],
+                                          ref.get("max_delay_us", 0.0), R_map)
+                source = "fitted on the map area"
+            else:
+                phi, tau = np.radians(float(ref.get("phi_deg", 0.0))), float(ref.get("tau_us", 0.0)) * 1e-6
+                source = "fixed"
+            if ref["freedom"] == "phase":
+                tau = 0.0
+            ref["phi"], ref["tau"] = phi, tau
+            out["correction"] = {"phi_deg": float(np.degrees(phi)), "tau_us": tau * 1e6, "source": source}
         if job.get("map"):
             m = job["map"]
-            out["map"] = infidelity_grid(ps, m["offsets_hz"], m["scales"], ref)
+            out["map"] = (infidelity_from_matrices(R_map, ref, m["offsets_hz"]) if R_map is not None
+                          else infidelity_grid(ps, m["offsets_hz"], m["scales"], ref))
         if job.get("cut_offset"):
             c = job["cut_offset"]
             out["cut_offset"] = infidelity_grid(ps, c["offsets_hz"], [c["scale"]], ref)[0]

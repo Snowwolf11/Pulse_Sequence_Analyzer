@@ -349,7 +349,8 @@ The panel shows the gate (rotation angle and axis), the robustness against detun
 third order (end point, area and third-order term of the error curve), the first-order robustness against
 amplitude (B1) scaling, the error curve in 3D and the fidelity vs. offset; ⊕ opens a fidelity analysis window
 (fidelity vs. offset × amplitude as 3D surface or heat map, plus cuts at fixed amplitude / offset, computed on
-Refresh in a separate process). Pulses are saved as CSV or Bruker
+Refresh in a separate process; optionally up to a free or linear phase after the pulse, fitted on the map area
+or fixed, with the phase and delay shown). Pulses are saved as CSV or Bruker
 shape files and can be sent directly to the analyzer.
 
 **Solver.** In the Waveform, Curve families and Curve builder tabs a solver adjusts free variables
@@ -375,10 +376,13 @@ screening rounds that keep the best candidates and give them more budget, kicks 
 (optionally with a temperature), coarse-to-fine stages and an experimental crossover. All candidates run in
 parallel and the best result is kept. "Stay close to start" regularization is optional. It uses the same solver
 settings.
-A *quick* mode needs only the gate, duration, bandwidth, rate limits and a time budget; it runs the recipe
+A *quick* mode needs only the gate, duration, bandwidth, optionally a B1 range, rate limits and a time budget; it runs the recipe
 found in a settings study (`studies/quick_settings_study.py`: broadband grid, spline controls, 22 starts with
 screening, rate limits in a last stage and a final polish of the 3 best) on all cores and returns the pulse
-with the smallest worst-case infidelity over the band that keeps the limits.
+with the smallest worst-case infidelity over the band that keeps the limits. With an output folder the
+result is saved under a descriptive name (pulse_0550us_UR235-180_off20_B140_1.bruker); a *series* of
+durations builds a pulse library (one folder, one pulse per duration, library.json) shown in a small library
+window (infidelity vs. duration).
 
 Conventions: on resonance, unit-speed error curve whose length is the pulse duration, curvature = Rabi
 frequency, torsion = phase change rate. Curves are converted into pulses exactly (the pulse reproduces the

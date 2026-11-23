@@ -43,12 +43,14 @@ PRESET_TIPS = {
     "custom": "your own values (Advanced…)",
 }
 DEAD_PEN = pg.mkPen("#6b7280", width=0.7)
+STOP_GRACE_S = 10.0                          # after Stop: time for the workers to return their best, then killed
 QUICK_TIP = ("Quick mode: give the gate, duration, bandwidth and a time budget; the rest is the recipe of the "
              "quick-settings study: broadband grid (2 points per 1/T), spline controls (one per 6 µs), smoothness "
              "1e-6, 22 starts (one screening round, the best third continues), rate limits switched on in a last "
              "stage, and in the last 20 % of the time the 3 best pulses are re-optimized with the limits. The result "
              "is the pulse with the smallest worst-case infidelity over the band (401 test offsets) that keeps the "
-             "limits. Start: rectangular pulse, rf amplitude from the editor's metadata.")
+             "limits. Optional B1 range: the offsets times 2 B1 values per 1/T on the axis (scaling − 1) × rf (at least 3), "
+             "scored over the whole area. Start: rectangular pulse, rf amplitude from the editor's metadata.")
 
 
 def start_workers(ctx, n, args):
@@ -169,13 +171,34 @@ class GrapeTab(QWidget):
         qf = QFormLayout(self.quick_box)
         self.q_dur_spin = QDoubleSpinBox(); self.q_dur_spin.setRange(1, 1e5); self.q_dur_spin.setDecimals(1)
         self.q_dur_spin.setSuffix(" µs"); self.q_dur_spin.setValue(450.0)
-        qf.addRow("duration:", self.q_dur_spin)
+        drow0 = QHBoxLayout()
+        self.q_series_check = QCheckBox("series to")
+        self.q_series_check.setToolTip("a pulse library: one quick run per duration, from this duration to the "
+                                       "second one; the time budget is the total, split in proportion to the "
+                                       "durations; the pulses are saved in a new folder in the output folder")
+        self.q_dur_hi_spin = QDoubleSpinBox(); self.q_dur_hi_spin.setRange(1, 1e5); self.q_dur_hi_spin.setDecimals(1)
+        self.q_dur_hi_spin.setSuffix(" µs"); self.q_dur_hi_spin.setValue(600.0)
+        self.q_count_spin = QSpinBox(); self.q_count_spin.setRange(2, 1000); self.q_count_spin.setValue(6)
+        self.q_count_spin.setSuffix(" pulses")
+        drow0.addWidget(self.q_dur_spin); drow0.addWidget(self.q_series_check); drow0.addWidget(self.q_dur_hi_spin)
+        drow0.addWidget(self.q_count_spin)
+        qf.addRow("duration:", drow0)
+        self.q_series_check.toggled.connect(self._series_changed)
         brow0 = QHBoxLayout()
         self.q_lo_spin, self.q_hi_spin = QDoubleSpinBox(), QDoubleSpinBox()
         for sp, v in ((self.q_lo_spin, -10.0), (self.q_hi_spin, 10.0)):
             sp.setRange(-1e4, 1e4); sp.setDecimals(2); sp.setSuffix(" kHz"); sp.setValue(v)
         brow0.addWidget(self.q_lo_spin); brow0.addWidget(QLabel("to")); brow0.addWidget(self.q_hi_spin)
         qf.addRow("bandwidth:", brow0)
+        b1row0 = QHBoxLayout()
+        self.q_b1_lo_spin, self.q_b1_hi_spin = QDoubleSpinBox(), QDoubleSpinBox()
+        for sp in (self.q_b1_lo_spin, self.q_b1_hi_spin):
+            sp.setRange(1, 1000); sp.setDecimals(1); sp.setSuffix(" %"); sp.setValue(100.0)
+            sp.setToolTip("amplitude (B1) range the pulse should work over; 100 to 100 = off (nominal amplitude "
+                          "only). B1 values: 2 per 1/T on the axis (scaling − 1) × rf amplitude, as for the offsets")
+            sp.valueChanged.connect(self._quick_info)
+        b1row0.addWidget(self.q_b1_lo_spin); b1row0.addWidget(QLabel("to")); b1row0.addWidget(self.q_b1_hi_spin)
+        qf.addRow("B1 range:", b1row0)
         lrow0 = QHBoxLayout()
         self.q_amp_rate_spin = QDoubleSpinBox(); self.q_amp_rate_spin.setRange(0, 1e6); self.q_amp_rate_spin.setDecimals(1)
         self.q_amp_rate_spin.setSuffix(" %/µs"); self.q_amp_rate_spin.setSpecialValueText("off"); self.q_amp_rate_spin.setValue(20.0)
@@ -190,16 +213,45 @@ class GrapeTab(QWidget):
         self.q_budget_spin = QDoubleSpinBox(); self.q_budget_spin.setRange(0.5, 600); self.q_budget_spin.setDecimals(1)
         self.q_budget_spin.setSuffix(" min"); self.q_budget_spin.setValue(10.0)
         self.q_budget_spin.setToolTip("wall-clock time of the run (all cores but one); in the study most of the gain "
-                                      "came in the first few minutes, 20 min gave ~10 % more")
+                                      "came in the first few minutes, 20 min gave ~10 % more. For a series: the "
+                                      "total, split in proportion to the durations")
         self.q_seed_spin = QSpinBox(); self.q_seed_spin.setRange(0, 10 ** 6); self.q_seed_spin.setPrefix("seed ")
         trow0.addWidget(self.q_budget_spin); trow0.addWidget(self.q_seed_spin); trow0.addStretch()
-        qf.addRow("time budget:", trow0)
-        qnote = QLabel("Set the gate below. Tuned for UR gates over ±10 kHz at 10 kHz rf.")
+        self.q_budget_label = QLabel("time budget:")
+        qf.addRow(self.q_budget_label, trow0)
+        frow0 = QHBoxLayout()
+        self.q_folder_edit = QLineEdit(); self.q_folder_edit.setPlaceholderText("not saved (single pulse)")
+        self.q_folder_edit.setToolTip("results are saved here: a single pulse as pulse_0550us_UR235-180_off20_B140_1"
+                                      ".bruker (duration, goal of most points, offset range in kHz and B1 range in %, "
+                                      "index); a series in a new folder named that way, with pulse_0405us.bruker per "
+                                      "duration and library.json")
+        self.q_folder_button = QPushButton("…"); self.q_folder_button.setFixedWidth(32)
+        self.q_folder_button.clicked.connect(self._choose_folder)
+        frow0.addWidget(self.q_folder_edit, 1); frow0.addWidget(self.q_folder_button)
+        qf.addRow("output folder:", frow0)
+        self.library_button = QPushButton("Library…")
+        self.library_button.setToolTip("the pulse library window: worst / mean infidelity vs. duration of a series; "
+                                       "open existing libraries")
+        self.library_button.clicked.connect(self.open_library_window)
+        qf.addRow(self.library_button)
+        self.q_points_info = QLabel(""); self.q_points_info.setStyleSheet(f"color: {MUTED_FG};")
+        self.q_points_info.setWordWrap(True)
+        qf.addRow(self.q_points_info)
+        for sp in (self.q_dur_spin, self.q_lo_spin, self.q_hi_spin, self.q_budget_spin):
+            sp.valueChanged.connect(self._quick_info)
+        qnote = QLabel("Set the gate below. Tuned for UR gates over ±10 kHz at 10 kHz rf (the B1 range is not "
+                       "part of the study yet).")
         qnote.setStyleSheet(f"color: {MUTED_FG};"); qnote.setWordWrap(True)
         qf.addRow(qnote)
         ll.addWidget(self.quick_box)
-        self.quick_widgets = [self.q_dur_spin, self.q_lo_spin, self.q_hi_spin, self.q_amp_rate_spin,
-                              self.q_phase_rate_spin, self.q_budget_spin, self.q_seed_spin]
+        self.quick_widgets = [self.q_dur_spin, self.q_lo_spin, self.q_hi_spin, self.q_b1_lo_spin, self.q_b1_hi_spin,
+                              self.q_amp_rate_spin, self.q_phase_rate_spin, self.q_budget_spin, self.q_seed_spin,
+                              self.q_series_check, self.q_dur_hi_spin, self.q_count_spin, self.q_folder_edit,
+                              self.q_folder_button]
+        for sp in (self.q_dur_hi_spin, self.q_count_spin):
+            sp.valueChanged.connect(self._quick_info)
+        self.library_window = None
+        self._series = None
 
         # ---- start pulse
         sbox = QGroupBox("Start pulse")
@@ -455,6 +507,7 @@ class GrapeTab(QWidget):
         self._freedom_changed()
         self.quick_radio.toggled.connect(self._run_mode_changed)
         self._run_mode_changed()
+        self._series_changed()
         lock_heights(self)
         self.load_start()
 
@@ -474,24 +527,99 @@ class GrapeTab(QWidget):
         if quick and self.gate_box.currentIndex() == 0:
             self.gate_box.setCurrentIndex(1)
 
-    def quick_setup(self):
-        """(start pulse, GrapeConfig, SolverSettings) of a quick run from the inputs (ValueError if invalid)."""
+    def quick_setup(self, duration_s=None):
+        """(start pulse, GrapeConfig, SolverSettings) of a quick run from the inputs (ValueError if invalid);
+        duration_s: another duration than the field's (series)."""
         i = self.gate_box.currentIndex()
         if i == 0:
             raise ValueError("quick mode needs a gate goal (UR or PP)")
-        T = self.q_dur_spin.value() * 1e-6
+        T = self.q_dur_spin.value() * 1e-6 if duration_s is None else duration_s
         if T / self.dt < 8:
             raise ValueError(f"the duration is only {T / self.dt:.0f} sub-pulses")
         if not self.q_hi_spin.value() > self.q_lo_spin.value():
             raise ValueError("bandwidth: the upper offset must be above the lower one")
         if not any(abs(s.value()) > 0 for s in (self.axis_spins if i == 1 else self.mt_spins)):
             raise ValueError("the gate axis / target vector must not be zero")
+        if self.q_b1_hi_spin.value() < self.q_b1_lo_spin.value():
+            raise ValueError("B1 range: the upper value must not be below the lower one")
         cfg, st = quick_config(T, (self.q_lo_spin.value() * 1e3, self.q_hi_spin.value() * 1e3), ("UR", "PP")[i - 1],
                                [s.value() for s in self.axis_spins], self.angle_spin.value(),
                                [s.value() for s in self.m0_spins], [s.value() for s in self.mt_spins],
                                self.q_amp_rate_spin.value(), self.q_phase_rate_spin.value(),
-                               seed=self.q_seed_spin.value(), dt=self.dt)
+                               seed=self.q_seed_spin.value(), dt=self.dt, b1_range=self.quick_b1_range(),
+                               umax_hz=self.umax)
         return rectangular_start(T, self.dt, self.umax), cfg, st
+
+    def quick_b1_range(self):
+        """(lower, upper) amplitude scaling of the quick mode (1 = nominal)."""
+        return self.q_b1_lo_spin.value() / 100.0, self.q_b1_hi_spin.value() / 100.0
+
+    @property
+    def series(self):
+        return self.quick_mode and self.q_series_check.isChecked()
+
+    def series_plan(self):
+        """(durations [s], budgets [s]) of the series from the fields (ValueError if invalid)."""
+        from psa.design.library import series_budgets, series_durations
+        lo, hi = self.q_dur_spin.value(), self.q_dur_hi_spin.value()
+        if not hi > lo:
+            raise ValueError("series: the second duration must be longer than the first")
+        durs = series_durations(lo, hi, self.q_count_spin.value())
+        return durs, series_budgets(durs, self.q_budget_spin.value() * 60.0)
+
+    def _series_changed(self, *args):
+        on = self.q_series_check.isChecked()
+        self.q_dur_hi_spin.setVisible(on); self.q_count_spin.setVisible(on)
+        self.q_budget_label.setText("total time:" if on else "time budget:")
+        self.q_folder_edit.setPlaceholderText("required for a series" if on else "not saved (single pulse)")
+        self._quick_info()
+
+    def _choose_folder(self):
+        from PySide6.QtWidgets import QFileDialog
+        folder = QFileDialog.getExistingDirectory(self, "Output folder", self.q_folder_edit.text())
+        if folder:
+            self.q_folder_edit.setText(folder)
+
+    def open_library_window(self):
+        if self.library_window is None:
+            from psa.editor_gui.library_window import LibraryWindow
+            self.library_window = LibraryWindow(self)
+            self.library_window.pulseChosen.connect(self._library_pulse)
+        self.library_window.show(); self.library_window.raise_(); self.library_window.activateWindow()
+
+    def _library_pulse(self, ps):
+        if self.solving:
+            return
+        self.result = ps
+        self._show_result(ps)
+        self.pulseChanged.emit(ps)
+
+    def _quick_info(self, *args):
+        """Point count of the quick recipe; with a B1 range a hint on the longer evaluations; for a series
+        the durations and their time."""
+        if getattr(self, "q_series_check", None) is not None and self.q_series_check.isChecked():
+            try:
+                durs, budgets = self.series_plan()
+            except ValueError as e:
+                self.q_points_info.setText(str(e)); return
+            self.q_points_info.setText(
+                f"{len(durs)} pulses: " + ", ".join(f"{d * 1e6:.0f}" for d in durs) + " µs; "
+                f"{budgets[0] / 60:.1f} … {budgets[-1] / 60:.1f} min each (in proportion to the duration)")
+            return
+        T = self.q_dur_spin.value() * 1e-6
+        lo, hi = self.q_lo_spin.value() * 1e3, self.q_hi_spin.value() * 1e3
+        if not hi > lo:
+            self.q_points_info.setText(""); return
+        from psa.design.quick import RECIPE, b1_count
+        n_off = max(2, int(round(RECIPE["density"] * (hi - lo) * T)) + 1)
+        b1 = self.quick_b1_range()
+        n_b1 = b1_count(b1, getattr(self, "umax", 0.0) or 0.0, T) if b1[1] >= b1[0] else 1
+        if n_b1 <= 1:
+            self.q_points_info.setText(f"{n_off} offsets (nominal amplitude)")
+            return
+        self.q_points_info.setText(f"{n_off} offsets × {n_b1} B1 values = {n_off * n_b1} points: each evaluation "
+                                   f"is ~{n_b1}× slower than without B1; a longer time budget helps "
+                                   f"(e.g. {min(600, self.q_budget_spin.value() * n_b1):g} min)")
 
     # ------------------------------------------------------------- points ---
     def grid_selection(self):
@@ -798,6 +926,7 @@ class GrapeTab(QWidget):
 
     def set_metadata(self, dt, umax):
         self.dt, self.umax = dt, umax
+        self._quick_info()
         if self.start_pulse is not None and not self.solving:
             ps = self.current_pulse()
             self.set_start(PulseSequence(ps.amplitude, ps.phase, dt, umax))
@@ -835,14 +964,23 @@ class GrapeTab(QWidget):
     def start(self):
         self._quick = None
         if self.quick_mode:
+            budget = self.q_budget_spin.value() * 60.0
             try:
-                ps0, cfg, settings = self.quick_setup()
-            except ValueError as e:
+                if self._series is None and self.series:
+                    self._begin_series()
+                if self._series is not None:
+                    k = self._series["index"]
+                    T, budget = self._series["durations"][k], self._series["budgets"][k]
+                    ps0, cfg, settings = self.quick_setup(T)
+                else:
+                    ps0, cfg, settings = self.quick_setup()
+            except (ValueError, OSError) as e:
+                self._series = None
                 self._show(str(e), BAD)
                 return
             self.set_start(ps0)
             n_workers = self.max_parallel()
-            self._quick = QuickRun(ps0, cfg, settings, self.q_budget_spin.value() * 60.0, parallel=n_workers)
+            self._quick = QuickRun(ps0, cfg, settings, budget, parallel=n_workers)
             self._search = self._quick
         else:
             if self.start_pulse is None:
@@ -865,6 +1003,7 @@ class GrapeTab(QWidget):
         self._clear_convergence()
         self._current = {}
         self._failure = None
+        self._snapshot = None                     # best pulse shown during the run (fallback if Stop gets nothing)
         ctx = mp.get_context("spawn")
         self._tasks, self._queue, self._stop_event = ctx.Queue(), ctx.Queue(), ctx.Event()
         self._workers = start_workers(ctx, n_workers, (self._tasks, self._queue, self._stop_event))
@@ -903,15 +1042,71 @@ class GrapeTab(QWidget):
                     proc.terminate()
             self._finish()
 
+    def _begin_series(self):
+        """Create the library folder of a new series (ValueError / OSError if impossible)."""
+        from psa.design.library import library_folder, write_index
+        folder = self.q_folder_edit.text().strip()
+        if not folder:
+            raise ValueError("a series needs an output folder")
+        if not os.path.isdir(folder):
+            raise ValueError(f"the output folder does not exist: {folder}")
+        durs, budgets = self.series_plan()
+        cfg = self.quick_setup(durs[-1])[1]
+        path = library_folder(folder, cfg, durs)
+        os.makedirs(path)
+        settings = {"n_pulses": len(durs), "durations_us": [round(d * 1e6, 6) for d in durs],
+                    "budgets_s": budgets, "band_khz": [self.q_lo_spin.value(), self.q_hi_spin.value()],
+                    "b1_percent": [self.q_b1_lo_spin.value(), self.q_b1_hi_spin.value()],
+                    "rates": [self.q_amp_rate_spin.value(), self.q_phase_rate_spin.value()],
+                    "seed": self.q_seed_spin.value(), "dt": self.dt, "umax_hz": self.umax,
+                    "config_of_longest": cfg.to_dict()}
+        self._series = {"folder": path, "durations": durs, "budgets": budgets, "index": 0, "pulses": [],
+                        "settings": settings}
+        write_index(path, settings, [])
+        self.open_library_window()
+        self.library_window.set_library(path, [], len(durs))
+
+    def _save_quick(self, pulse, s, cfg, T):
+        """Save a quick-mode result: into the series folder, or (if an output folder is set) as a single pulse.
+        Returns the path or None."""
+        from psa.design.library import library_file, single_path, write_index
+        if self._series is not None:
+            sr = self._series
+            path = os.path.join(sr["folder"], library_file(T))
+            pulse.save(path)
+            b = s["band"]
+            sr["pulses"].append({"duration_us": round(T * 1e6, 6), "file": os.path.basename(path),
+                                 "worst": b["worst infidelity"], "mean": b["mean infidelity"],
+                                 "below_1e-4": b["fraction below 0.0001"], "amp_rate": s["rates"][0],
+                                 "phase_rate": s["rates"][1], "within_limits": s["within_limits"],
+                                 "stopped": self._quick.stopped, "elapsed_s": s["elapsed_s"]})
+            write_index(sr["folder"], sr["settings"], sr["pulses"])
+            if self.library_window is not None:
+                self.library_window.set_library(sr["folder"], sr["pulses"], len(sr["durations"]))
+            return path
+        folder = self.q_folder_edit.text().strip()
+        if not folder:
+            return None
+        if not os.path.isdir(folder):
+            raise OSError(f"the output folder does not exist: {folder}")
+        path = single_path(folder, cfg, T)
+        pulse.save(path)
+        return path
+
     def _quick_progress_text(self):
         q = self._quick
         phase = {"search": f"searching ({len(q.cands)} candidates, round {q.round + 1})",
                  "polish": f"polishing the {q._polished} best with the rate limits",
                  "stopping": "stopping"}.get(q.phase, q.phase)
         inc = q.incumbent
-        best = (f"best within the limits: worst infidelity {inc['band']['worst infidelity']:.2e}, mean "
+        where = (f" (at {inc['band']['worst at offset [kHz]']:g} kHz, {inc['band']['worst at B1 [%]']:g} %)"
+                 if inc is not None and "worst at B1 [%]" in inc["band"] else "")
+        best = (f"best within the limits: worst infidelity {inc['band']['worst infidelity']:.2e}{where}, mean "
                 f"{inc['band']['mean infidelity']:.2e}" if inc is not None else "no pulse within the limits yet")
-        return (f"quick mode: {phase} – {q.elapsed():.0f} s of {q.budget:.0f} s, {q.slices} slices\n{best}"
+        sr = self._series
+        series = (f"series: pulse {sr['index'] + 1} of {len(sr['durations'])} ({sr['durations'][sr['index']] * 1e6:.0f} µs) – "
+                  if sr is not None else "")
+        return (f"{series}quick mode: {phase} – {q.elapsed():.0f} s of {q.budget:.0f} s, {q.slices} slices\n{best}"
                 "  (click Stop to end early and keep the best so far)")
 
     def _progress_text(self):
@@ -958,7 +1153,7 @@ class GrapeTab(QWidget):
                 self._current[cid] = msg[4]
                 if msg[4] <= min(self._current.values()):           # show the candidate that is best right now
                     ps = PulseSequence(np.asarray(msg[2]), np.asarray(msg[3]), self.start_pulse.dt, self.start_pulse.umax)
-                    self.result = ps
+                    self.result = self._snapshot = ps
                     self._show_result(ps)
                     self.pulseChanged.emit(ps)
             elif kind == "done":
@@ -988,7 +1183,7 @@ class GrapeTab(QWidget):
                     self.pulseChanged.emit(ps)
                 self._dispatch()
                 changed = True
-        if self._stop_requested_at is not None and time.time() - self._stop_requested_at > 5:
+        if self._stop_requested_at is not None and time.time() - self._stop_requested_at > STOP_GRACE_S:
             for proc in self._workers:
                 proc.terminate()
             self._search.phase = "done"
@@ -1017,6 +1212,15 @@ class GrapeTab(QWidget):
         try:
             cid, pulse, info = self._search.best()
         except RuntimeError as e:
+            snap = getattr(self, "_snapshot", None)
+            if snap is not None:                  # nothing returned in time (busy machine): keep the pulse shown
+                self.result = snap
+                self._show_result(snap)
+                self._recolor()
+                self._show(f"stopped – no candidate returned its result within {STOP_GRACE_S:g} s; kept the best pulse "
+                           "received so far (as shown)", BAD)
+                self.pulseChanged.emit(snap)
+                return
             self._show(getattr(self, "_failure", None) or str(e) or "optimizer terminated (no result)", BAD)
             return
         self.result = pulse
@@ -1054,14 +1258,42 @@ class GrapeTab(QWidget):
         head = "quick run stopped – best so far" if q.stopped else "quick run finished"
         if not s["within_limits"]:
             head += " – no pulse kept the rate limits: best one without them"
+        if len(q.band) > 3:
+            where = (f"over {lo:g} … {hi:g} kHz × {q.band[3] * 100:g} … {q.band[4] * 100:g} % ({q.band[2]}×{q.band[5]} "
+                     f"test points): worst infidelity {b['worst infidelity']:.2e} (at {b['worst at offset [kHz]']:g} kHz, "
+                     f"{b['worst at B1 [%]']:g} %)")
+        else:
+            where = f"over {lo:g} … {hi:g} kHz (401 test offsets): worst infidelity {b['worst infidelity']:.2e}"
         text = (f"{head} ({s['elapsed_s']:.0f} s, {s['candidates']} candidates, {s['slices']} slices)\n"
-                f"over {lo:g} … {hi:g} kHz (401 test offsets): worst infidelity {b['worst infidelity']:.2e}, mean "
+                f"{where}, mean "
                 f"{b['mean infidelity']:.2e}, {100 * b['fraction below 0.0001']:.0f} % of the band below 1e-4\n"
                 f"rates: amplitude {ar:.1f} %/µs, phase {pr:.1f} kHz")
         if s["log"]:
             text += "\n" + "\n".join(s["log"])
         if self._failure:
             text += f"\n{self._failure}"
+        T = self._series["durations"][self._series["index"]] if self._series is not None else pulse.duration
+        try:
+            path = self._save_quick(pulse, s, self._cfg, T)
+        except (OSError, ValueError) as e:
+            path, text = None, text + f"\nnot saved: {e}"
+        sr = self._series
+        if sr is not None:
+            n = len(sr["durations"])
+            text = f"series: pulse {sr['index'] + 1} of {n} ({T * 1e6:.0f} µs) saved\n" + text
+            if not q.stopped and sr["index"] + 1 < n and path is not None:
+                sr["index"] += 1
+                self._show(text, GOOD if s["within_limits"] else BAD)
+                self.pulseChanged.emit(pulse)
+                QTimer.singleShot(0, self.start)                 # the next duration
+                return
+            text = (f"series {'stopped' if q.stopped else 'finished'}: {len(sr['pulses'])} of {n} pulses in "
+                    f"{sr['folder']}\n" + text)
+            self.last_library = sr["folder"]
+            self._series = None
+        elif path is not None:
+            text += f"\nsaved: {path}"
+        self.last_saved = path
         self._show(text, GOOD if s["within_limits"] else BAD)
         self.pulseChanged.emit(pulse)
 

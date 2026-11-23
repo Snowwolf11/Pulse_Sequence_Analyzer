@@ -3,7 +3,8 @@
 Main plot: fidelity over offset × amplitude (B1 scaling) as a 3D surface or a heat map, with settable
 ranges and resolution. Below (scrollable): fidelity vs. offset at a fixed amplitude and fidelity vs.
 amplitude at a fixed offset. Reference: the pulse's own gate at 0 kHz / 100 % (as the panel), a UR rotation
-or a PP transfer. Not live: "Refresh" takes the editor's current pulse and computes everything in a separate
+or a PP transfer, optionally up to a z-rotation after the pulse (free phase / linear phase), fitted on the map
+area or fixed (the correction applied in the experiment); the values are shown after Refresh. Not live: "Refresh" takes the editor's current pulse and computes everything in a separate
 worker process (psa.design.fidelity), so the window never blocks and does not interfere with a running
 optimization; a new Refresh replaces a running one.
 """
@@ -30,6 +31,8 @@ REFERENCES = ("automatic: the GRAPE gate goal while optimizing there, else the p
               "pulse's own gate (0 kHz, 100 %)", "gate goal of the GRAPE tab", "UR rotation (angle about an axis)",
               "PP (m0 → target)")
 AUTO, OWN, GOAL, UR, PP = range(5)
+FREEDOM_ITEMS = ("none", "free phase", "linear phase (phase + delay)")
+FREE_TEXT = {"phase": "up to a free phase", "linear": "up to a linear phase (phase + delay)"}
 
 
 def _fmt(v):
@@ -38,6 +41,11 @@ def _fmt(v):
 
 def describe(ref):
     """Short text of a reference dict."""
+    free = ref.get("freedom", "none")
+    if ref.get("kind") != "points" and free != "none":
+        how = ("fitted on the map area" if ref.get("fit", True) else
+               f"fixed: {float(ref.get('phi_deg', 0)):g}°" + (f", {float(ref.get('tau_us', 0)):g} µs" if free == "linear" else ""))
+        return f"{describe(dict(ref, freedom='none'))}, {FREE_TEXT[free]} ({how})"
     if ref.get("kind") == "UR":
         return f"UR {float(ref['angle']):g}° about {_fmt(ref['axis'])}"
     if ref.get("kind") == "PP":
@@ -120,6 +128,33 @@ class FidelityWindow(QDialog):
         row, self.m0_spins = _vector((0.0, 0.0, 1.0)); pf.addRow("from m0:", row)
         row, self.mt_spins = _vector((1.0, 0.0, 0.0)); pf.addRow("to:", row)
         sf.addRow(self.ur_widget); sf.addRow(self.pp_widget)
+        # ---- freedom of the own / UR / PP reference: a z-rotation after the pulse
+        self.free_widget = QWidget(); fl = QVBoxLayout(self.free_widget); fl.setContentsMargins(0, 0, 0, 0)
+        r1 = QHBoxLayout()
+        self.free_box = QComboBox(); self.free_box.addItems(FREEDOM_ITEMS)
+        self.free_box.setToolTip("judge the pulse only up to a z-rotation after it: a free phase (absorbed by later "
+                                 "pulse / receiver phases) or a phase linear in the offset (= a delay after the pulse; "
+                                 "removed by a first-order phase correction). As the freedom of the GRAPE tab")
+        self.free_source = QComboBox(); self.free_source.addItems(["fit on the map area", "fixed values"])
+        self.free_source.setToolTip("fit: the best correction for the map's offset × amplitude range (also used for "
+                                    "the cuts; computed even if the map is off). fixed: the correction you apply in "
+                                    "the experiment, e.g. the values from the GRAPE status")
+        r1.addWidget(QLabel("freedom:")); r1.addWidget(self.free_box, 1); r1.addWidget(self.free_source)
+        fl.addLayout(r1)
+        r2 = QHBoxLayout()
+        self.phi_label = QLabel("phase:"); self.phi_spin = _spin(-360, 360, 0.0, 3, " °")
+        self.tau_label = QLabel("delay:"); self.tau_spin = _spin(-1e5, 1e5, 0.0, 3, " µs")
+        self.tau_spin.setToolTip("delay of the linear phase: theta = phase + 360° · offset · delay")
+        self.max_delay_label = QLabel("max |delay|:"); self.max_delay_spin = _spin(0, 1e5, 0.0, 1, " µs")
+        self.max_delay_spin.setSpecialValueText("auto"); self.max_delay_spin.setToolTip("auto = the pulse duration")
+        for w in (self.phi_label, self.phi_spin, self.tau_label, self.tau_spin, self.max_delay_label,
+                  self.max_delay_spin):
+            r2.addWidget(w)
+        r2.addStretch()
+        fl.addLayout(r2)
+        sf.addRow(self.free_widget)
+        self.free_box.currentIndexChanged.connect(self._free_changed)
+        self.free_source.currentIndexChanged.connect(self._free_changed)
         self._ref_edited = False
         for sp in [self.angle_spin] + self.axis_spins + self.m0_spins + self.mt_spins:
             sp.valueChanged.connect(self._mark_ref_edited)
@@ -193,7 +228,29 @@ class FidelityWindow(QDialog):
                 self.set_reference_inputs(goal)
         self.ur_widget.setVisible(i == UR)
         self.pp_widget.setVisible(i == PP)
+        self.free_widget.setVisible(i in (OWN, UR, PP))      # automatic / GRAPE goal: the GRAPE tab's freedom
+        self._free_changed()
+
+    def _free_changed(self, *args):
+        free = self.free_box.currentIndex()
+        fixed = self.free_source.currentIndex() == 1
+        self.free_source.setVisible(free > 0)
+        for w in (self.phi_label, self.phi_spin):
+            w.setVisible(free > 0 and fixed)
+        for w in (self.tau_label, self.tau_spin):
+            w.setVisible(free == 2 and fixed)
+        for w in (self.max_delay_label, self.max_delay_spin):
+            w.setVisible(free == 2 and not fixed)
         self.update_ref_info()
+
+    @property
+    def freedom(self):
+        return ("none", "phase", "linear")[self.free_box.currentIndex()]
+
+    def set_correction(self, phi_deg, tau_us=0.0):
+        """Fixed correction values (e.g. from the GRAPE status)."""
+        self.free_source.setCurrentIndex(1)
+        self.phi_spin.setValue(phi_deg); self.tau_spin.setValue(tau_us)
 
     def update_ref_info(self):
         """Show which reference the current choice means right now."""
@@ -241,7 +298,15 @@ class FidelityWindow(QDialog):
         elif i == PP:
             ref = {"kind": "PP", "m0": [s.value() for s in self.m0_spins], "mt": [s.value() for s in self.mt_spins]}
         else:
-            return {"kind": "own"}, "the pulse's own gate (0 kHz, 100 %)"
+            ref = {"kind": "own"}
+        if self.freedom != "none":
+            ref["freedom"] = self.freedom
+            ref["fit"] = self.free_source.currentIndex() == 0
+            if ref["fit"]:
+                ref["max_delay_us"] = self.max_delay_spin.value()
+            else:
+                ref["phi_deg"] = self.phi_spin.value()
+                ref["tau_us"] = self.tau_spin.value() if self.freedom == "linear" else 0.0
         return ref, describe(ref)
 
     @staticmethod
@@ -277,6 +342,12 @@ class FidelityWindow(QDialog):
             job["cut_amp"] = {"scales": scales.tolist(), "offset_hz": self.cut_amp_off.value() * 1e3}
         if not any(job[k] for k in ("map", "cut_offset", "cut_amp")):
             raise ValueError("nothing to compute: enable at least one plot")
+        if ref.get("freedom", "none") != "none" and ref.get("kind") != "points" and ref.get("fit", True) \
+                and not job["map"]:                   # fit on the map ranges even if the map is not shown
+            scales = self._values(self.map_amp, 0.01)
+            if scales[0] <= 0:
+                raise ValueError("amplitudes must be positive")
+            job["fit_area"] = {"offsets_hz": self._values(self.map_off, 1e3).tolist(), "scales": scales.tolist()}
         return job
 
     # ------------------------------------------------------------- worker ---
@@ -340,7 +411,7 @@ class FidelityWindow(QDialog):
                 self._computed_pulse = self._job_pulse
                 self._show(f"computed in {res['elapsed_s']:.1f} s for {self._job_pulse.N} sub-pulses, "
                            f"{self._job_pulse.duration * 1e6:.1f} µs ({time.strftime('%H:%M:%S')}); reference: "
-                           f"{self._job['reference_label']}", GOOD)
+                           f"{self._job['reference_label']}{self.correction_text(res)}", GOOD)
                 self.redraw()
         if self._pending is None:
             self._poll.stop()
@@ -348,6 +419,15 @@ class FidelityWindow(QDialog):
             self._pending = None
             self._poll.stop()
             self._show("the computation process ended unexpectedly", BAD)
+
+    @staticmethod
+    def correction_text(res):
+        """'; correction: phase …°, delay … µs (source)' of a result with a free z-rotation, else ''."""
+        c = res.get("correction")
+        if not c:
+            return ""
+        delay = f", delay {c['tau_us']:.2f} µs" if abs(c["tau_us"]) > 0 else ""
+        return f"; correction: phase {c['phi_deg']:.2f}°{delay} ({c['source']})"
 
     def pulse_changed(self, ps):
         """The editor's pulse changed: mark the plots as outdated."""

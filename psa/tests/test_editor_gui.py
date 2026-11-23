@@ -871,6 +871,72 @@ def test_fidelity_window():
     w.close()
 
 
+def test_fidelity_window_freedom():
+    """Freedom of the window's own UR / PP reference: fitted on the map area or fixed; the values are shown."""
+    from psa.design.fidelity import infidelity_grid
+    from psa.editor_gui.fidelity_window import AUTO, GOAL, PP, UR
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    tab.source_box.setCurrentText("rectangular"); tab.dur_spin.setValue(100.0); tab.load_button.click(); process(20)
+    wait_panel(w)
+    w.panel.fid_expand.click(); process(50)
+    fw = w.panel.fidelity_window
+    fw.map_off[2].setValue(21); fw.map_amp[2].setValue(5); fw.cut_off_range[2].setValue(41); fw.cut_amp_range[2].setValue(11)
+    for i in (AUTO, GOAL):                                 # the GRAPE tab's freedom there: no own row
+        fw.ref_box.setCurrentIndex(i); assert fw.free_widget.isHidden()
+    fw.ref_box.setCurrentIndex(PP)
+    fw.set_reference_inputs({"kind": "PP", "m0": [0, 0, 1], "mt": [1, 0, 0]})
+    assert not fw.free_widget.isHidden() and fw.free_source.isHidden()
+    fw.free_box.setCurrentIndex(2)                         # linear phase, fitted: max |delay| shown
+    assert not fw.max_delay_spin.isHidden() and fw.tau_spin.isHidden() and fw.phi_spin.isHidden()
+    ref, label = fw.reference()
+    assert ref == {"kind": "PP", "m0": [0.0, 0.0, 1.0], "mt": [1.0, 0.0, 0.0], "freedom": "linear", "fit": True,
+                   "max_delay_us": 0.0}
+    assert "up to a linear phase (phase + delay) (fitted on the map area)" in label
+    fw.refresh_button.click(); wait_until(lambda: not fw.busy, 120)
+    c = fw.result["correction"]
+    assert c["source"] == "fitted on the map area" and "correction: phase" in fw.status.text() and "delay" in fw.status.text()
+    plain = infidelity_grid(tab.start_pulse, np.linspace(-10e3, 10e3, 21), np.linspace(0.8, 1.2, 5),
+                            {"kind": "PP", "m0": [0, 0, 1], "mt": [1, 0, 0]})
+    assert np.mean(fw.result["map"]) <= np.mean(plain) + 1e-15
+    fitted = fw.result["map"]
+    fw.set_correction(c["phi_deg"], c["tau_us"])           # fixed = the fitted values: the same map
+    assert not fw.tau_spin.isHidden() and fw.max_delay_spin.isHidden()
+    assert "fixed:" in fw.reference()[1]
+    fw.refresh_button.click(); wait_until(lambda: not fw.busy, 120)
+    assert fw.result["correction"]["source"] == "fixed" and np.allclose(fw.result["map"], fitted, atol=1e-3)   # spins round
+    fw.map_check.setChecked(False); fw.free_source.setCurrentIndex(0)   # no map: still fitted on the map ranges
+    fw.refresh_button.click(); wait_until(lambda: not fw.busy, 120)
+    assert fw.result["map"] is None and np.isclose(fw.result["correction"]["tau_us"], c["tau_us"])
+    fw.free_box.setCurrentIndex(0)
+    assert "freedom" not in fw.reference()[0]
+    fw.close(); w.close()
+
+
+def test_grape_quick_b1_range():
+    """Quick mode B1 range: 100 to 100 % = off (plain recipe); a range adds the B1 values of the rule."""
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    tab.quick_radio.setChecked(True)
+    tab.q_dur_spin.setValue(450.0); tab.q_lo_spin.setValue(-10.0); tab.q_hi_spin.setValue(10.0)
+    assert tab.quick_b1_range() == (1.0, 1.0) and tab.q_points_info.text() == "19 offsets (nominal amplitude)"
+    assert tab.quick_setup()[1].bb_scale_n == 1
+    tab.q_b1_lo_spin.setValue(80.0); tab.q_b1_hi_spin.setValue(120.0)
+    assert "19 offsets × 5 B1 values = 95 points" in tab.q_points_info.text()
+    cfg = tab.quick_setup()[1]
+    assert (cfg.bb_scale_min, cfg.bb_scale_max, cfg.bb_scale_n) == (0.8, 1.2, 5)
+    tab.q_b1_hi_spin.setValue(70.0)
+    try:
+        tab.quick_setup()
+    except ValueError as e:
+        assert "B1" in str(e)
+    else:
+        raise AssertionError("accepted an inverted B1 range")
+    w.close()
+
+
 def test_grape_per_point_goals():
     """Selective pulses: own goals per point in the point editor (default: the GRAPE gate goal), shown in colours
     and the table, used by the config, the optimization, the area score and the fidelity window."""
@@ -1011,6 +1077,78 @@ def test_grape_tab_quick_mode():
     assert tab.q_dur_spin.isEnabled() and w.panel.pulse is out
     tab.expert_radio.setChecked(True)
     assert tab.expert_boxes[0].isVisibleTo(tab) and not tab.quick_box.isVisibleTo(tab)
+    w.close()
+
+
+def test_grape_quick_series_library():
+    """Quick mode output: a single pulse saved under the naming rule; a series (library) in its own folder with
+    library.json, shown in the library window; a click loads a pulse."""
+    import json
+    import tempfile
+    from psa.design.library import read_index
+    d = tempfile.mkdtemp()
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    tab.quick_radio.setChecked(True)
+    tab.gate_box.setCurrentIndex(1); tab.angle_spin.setValue(90.0)
+    for sp, v in zip(tab.axis_spins, (1.0, 0.0, 0.0)):
+        sp.setValue(v)
+    tab.q_lo_spin.setValue(-4.0); tab.q_hi_spin.setValue(4.0); tab.q_dur_spin.setValue(60.0)
+    tab.q_budget_spin.setValue(0.5); tab.q_folder_edit.setText(d)
+    assert tab.q_dur_hi_spin.isHidden() and tab.q_count_spin.isHidden()
+    tab.solve_button.click(); wait_until(lambda: not tab.solving, 120)
+    assert tab.last_saved == os.path.join(d, "pulse_0060us_UR100-90_off8_B10_1.bruker"), tab.status.text()
+    assert os.path.exists(tab.last_saved) and "saved:" in tab.status.text()
+    # series: 3 durations, total 0.5 min split in proportion; an existing name gets the next index
+    tab.q_series_check.setChecked(True)
+    assert not tab.q_dur_hi_spin.isHidden() and tab.q_budget_label.text() == "total time:"
+    tab.q_dur_spin.setValue(40.0); tab.q_dur_hi_spin.setValue(60.0); tab.q_count_spin.setValue(3)
+    durs, budgets = tab.series_plan()
+    assert [round(x * 1e6) for x in durs] == [40, 50, 60] and np.isclose(sum(budgets), 30.0)
+    assert budgets[2] > budgets[0] and "3 pulses: 40, 50, 60 µs" in tab.q_points_info.text()
+    os.makedirs(os.path.join(d, "pulse_0040-0060us_UR100-90_off8_B10_1"))
+    tab.solve_button.click()
+    lib = os.path.join(d, "pulse_0040-0060us_UR100-90_off8_B10_2")
+    assert os.path.isdir(lib) and tab.library_window.isVisible()
+    wait_until(lambda: not tab.solving and tab._series is None, 240)
+    idx = read_index(lib)
+    assert [p["file"] for p in idx["pulses"]] == ["pulse_0040us.bruker", "pulse_0050us.bruker", "pulse_0060us.bruker"]
+    assert idx["settings"]["n_pulses"] == 3 and all(os.path.exists(os.path.join(lib, p["file"])) for p in idx["pulses"])
+    assert tab.status.text().startswith("series finished: 3 of 3 pulses") and tab.last_library == lib
+    lw = tab.library_window
+    assert lw.table.rowCount() == 3 and len(lw.worst_curve.getData()[0]) == 3
+    lw._row_clicked(0, 0)
+    assert tab.result.N == 80                                           # 40 µs
+    lw.set_library(None, [])
+    assert lw.open_folder(lib) and lw.table.rowCount() == 3 and not lw.open_folder(d)
+    tab.q_folder_edit.setText("")
+    tab.solve_button.click()
+    assert not tab.solving and "output folder" in tab.status.text()
+    w.close()
+
+
+def test_grape_stop_without_result_keeps_the_shown_pulse():
+    """Stop when no candidate returned in time (busy machine): the last pulse shown is kept, not lost."""
+    from psa.editor_gui.tab_grape import STOP_GRACE_S
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    tab.source_box.setCurrentText("rectangular"); tab.dur_spin.setValue(50.0); tab.load_button.click(); process(20)
+    shown = PulseSequence(np.full(100, 60.0), np.zeros(100), tab.dt, tab.umax)
+
+    class NoResult:
+        cands = {}
+        def best(self):
+            raise RuntimeError("no result")
+
+    tab._quick, tab._search, tab._snapshot = None, NoResult(), shown
+    tab._complete()
+    assert tab.result is shown and tab.status.text().startswith("stopped") and f"{STOP_GRACE_S:g} s" in tab.status.text()
+    assert STOP_GRACE_S == 10.0
+    tab._snapshot = None
+    tab._complete()
+    assert "no result" in tab.status.text()
     w.close()
 
 
