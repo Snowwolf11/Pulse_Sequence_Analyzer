@@ -534,6 +534,8 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         self.torsion_plot = MplPlot()
 
         self.tabs.addTab(self.error_plot, "Error-Curve")
+        self._pending_plots = {}
+        self.tabs.currentChanged.connect(self._draw_curve_plots)
         self.tabs.addTab(self.trajectory_plot, "Trajectory")
         self.tabs.addTab(self.curvature_plot, "Curvature")
         self.tabs.addTab(self.torsion_plot, "Torsion")
@@ -543,15 +545,11 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         self._build_options_tab()
 
     def _build_stability_tab(self):
-        """Stability: the fidelity analysis of the editor (map over offset x amplitude, cuts, references, freedom;
-        computed on Refresh in a separate process)."""
+        """Stability: the fidelity analysis of the editor (map over offset x amplitude, cuts, references own / UR / PP,
+        freedom; computed on Refresh in a separate process) for the main window's pulse."""
         from psa.editor_gui.fidelity_window import FidelityPanel
-        self.stability_panel = FidelityPanel(self.current_pulse, self, self._grape_goal)
+        self.stability_panel = FidelityPanel(self.current_pulse, self, with_grape=False)   # the main window's pulse only
         self.tabs.addTab(self.stability_panel, "Stability")
-
-    def _grape_goal(self):
-        ed = getattr(self, "_editor_window", None)
-        return ed._grape_goal() if ed is not None else (None, False)
 
     def closeEvent(self, event):
         self.stability_panel.shutdown()
@@ -567,6 +565,22 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         sub.addTab(self.ps_plot, "Plots")
         self.ps_subtabs = sub
         self.tabs.addTab(sub, "Pulse_Sequence")
+        self._plots_dirty = False
+        sub.currentChanged.connect(self._refresh_pulse_plots)
+        self.tabs.currentChanged.connect(self._refresh_pulse_plots)
+
+    def _draw_curve_plots(self, *args, all_plots=False):
+        """Draw the pending curve plots: the visible one (or all, e.g. before an export)."""
+        for plot in list(self._pending_plots):
+            if all_plots or self.tabs.currentWidget() is plot:
+                self._pending_plots.pop(plot)()
+
+    def _refresh_pulse_plots(self, *args):
+        """Draw the pulse plots only when they are visible and the pulse changed (drawing is slow)."""
+        if (self._plots_dirty and self.tabs.currentWidget() is self.ps_subtabs
+                and self.ps_subtabs.currentWidget() is self.ps_plot and self.current_pulse() is not None):
+            self.plot_pulse(self.current_pulse())
+            self._plots_dirty = False
 
     def current_pulse(self):
         """The analyzed pulse (PulseSequence: the input's sub-pulses, nominal amplitude), or None."""
@@ -907,43 +921,27 @@ class PulseSequenceAnalyzerQt(QMainWindow):
             VM = result.VM
             expanded_x = CM[:, 0] + np.linspace(0, self.x_Expand, np.shape(CM)[0])
 
-            self.plot_3d(
-                self.error_plot,
-                expanded_x,
-                CM[:, 1],
-                CM[:, 2],
-                "Error-Kurve",
-            )
-            self.plot_3d(
-                self.trajectory_plot,
-                VM[:, 0],
-                VM[:, 1],
-                VM[:, 2],
-                "Trajectory",
-            )
-            self.plot_2d(
-                self.curvature_plot,
-                result.arc_length,
-                result.curvature,
-                "Curvature",
-                "arc_length",
-                "curvature",
-            )
-            self.plot_2d(
-                self.torsion_plot,
-                result.arc_length,
-                result.torsion,
-                "Torsion",
-                "arc_length",
-                "torsion",
-            )
+            self._pending_plots = {                             # drawn when visible (drawing is the slow part)
+                self.error_plot: lambda: self.plot_3d(self.error_plot, expanded_x, CM[:, 1], CM[:, 2], "Error-Kurve"),
+                self.trajectory_plot: lambda: self.plot_3d(self.trajectory_plot, VM[:, 0], VM[:, 1], VM[:, 2],
+                                                           "Trajectory"),
+                self.curvature_plot: lambda: self.plot_2d(self.curvature_plot, result.arc_length, result.curvature,
+                                                          "Curvature", "arc_length", "curvature"),
+                self.torsion_plot: lambda: self.plot_2d(self.torsion_plot, result.arc_length, result.torsion,
+                                                        "Torsion", "arc_length", "torsion"),
+            }
+            self._draw_curve_plots()
 
             ps = self._load_current_pulse(params)
-            self.curve_data_text.setPlainText(self.curve_data_string(result, ps, params))
+            if ps is not getattr(self, "_shown_ps", None):      # pulse-only parts: only when the pulse changed
+                self._shown_ps = ps
+                self._pulse_facts = self.pulse_facts(ps)
+                self.ps_matrix_text.setPlainText(self.pulse_text(ps))
+                self._plots_dirty = True
+                self.stability_panel.pulse_changed(ps)
+            self._refresh_pulse_plots()
+            self.curve_data_text.setPlainText(self._pulse_facts + self.shown_curve_facts(result, ps, params))
             self.info_error_text.setPlainText(self.info_error_string(params))
-            self.ps_matrix_text.setPlainText(self.pulse_text(ps))
-            self.plot_pulse(ps)
-            self.stability_panel.pulse_changed(ps)
 
             return result
 
@@ -1022,23 +1020,20 @@ class PulseSequenceAnalyzerQt(QMainWindow):
 
     def curve_data_string(self, result, ps, params):
         """Facts of the pulse (as the editor's panel) and of the shown error curve."""
+        return self.pulse_facts(ps) + self.shown_curve_facts(result, ps, params)
+
+    @staticmethod
+    def _fv(v, d=4):
+        return "(" + ", ".join(f"{x:+.{d}f}" for x in v) + ")"
+
+    def pulse_facts(self, ps):
+        """Facts that depend only on the pulse: size, amplitude, power, gate and robustness on resonance."""
         from psa.design import metrics
-        from psa.rotations import propagate_batch
-        fv = lambda v, d=4: "(" + ", ".join(f"{x:+.{d}f}" for x in v) + ")"
+        fv = self._fv
         peak = float(np.max(ps.amplitude)) if ps.N else 0.0
         rel = float(np.mean((ps.amplitude / 100.0) ** 2)) if ps.N else 0.0
         a = metrics.analyze(ps, b1=True)
         g, rb = a["gate"], a["robustness"]
-        scale, off = params.scaling_percent / 100.0, params.offset_khz * 1e3
-        q = propagate_batch(ps.as_array(), ps.dt, ps.umax * scale, off)
-        q = q if q[0] >= 0 else -q
-        s_ = np.linalg.norm(q[1:])
-        ang = 2 * np.degrees(np.arctan2(s_, q[0]))
-        ax_here = q[1:] / s_ if s_ > 1e-12 else np.array([0.0, 0.0, 1.0])
-        CM = np.asarray(result.CM, float) * 1e6                          # µs (vector length 1)
-        r_end = CM[-1] - CM[0]
-        area = 0.5 * np.sum(np.cross(CM[:-1] - CM[0], CM[1:] - CM[0]), axis=0)   # 1/2 ∫ r × dr, exact for the polygon
-        length = float(np.sum(np.linalg.norm(np.diff(CM, axis=0), axis=1)))
         return (
             f"Pulse: {ps.N} sub-pulses × {ps.dt * 1e6:g} µs = {ps.duration * 1e6:.2f} µs\n"
             f"max. amplitude: {peak:.2f} % = {peak * ps.umax / 1e5:.3f} kHz\n"
@@ -1050,6 +1045,23 @@ class PulseSequenceAnalyzerQt(QMainWindow):
             f"  2nd order |A2|/T²: {rb['A2_norm']:.3e}\n"
             f"  3rd order |A3|/T³: {rb['A3_norm']:.3e}\n"
             f"  B1 scaling (1st): {a['B1']['B1_norm']:.3e}\n"
+        )
+
+    def shown_curve_facts(self, result, ps, params):
+        """Facts of the shown error curve at the set offset / amplitude (cheap: recomputed every update)."""
+        from psa.rotations import propagate_batch
+        fv = self._fv
+        scale, off = params.scaling_percent / 100.0, params.offset_khz * 1e3
+        q = propagate_batch(ps.as_array(), ps.dt, ps.umax * scale, off)
+        q = q if q[0] >= 0 else -q
+        s_ = np.linalg.norm(q[1:])
+        ang = 2 * np.degrees(np.arctan2(s_, q[0]))
+        ax_here = q[1:] / s_ if s_ > 1e-12 else np.array([0.0, 0.0, 1.0])
+        CM = np.asarray(result.CM, float) * 1e6                          # µs (vector length 1)
+        r_end = CM[-1] - CM[0]
+        area = 0.5 * np.sum(np.cross(CM[:-1] - CM[0], CM[1:] - CM[0]), axis=0)   # 1/2 ∫ r × dr, exact for the polygon
+        length = float(np.sum(np.linalg.norm(np.diff(CM, axis=0), axis=1)))
+        return (
             f"\nShown curve ({params.offset_khz:g} kHz, {params.scaling_percent:g} %):\n"
             f"  rotation there: {ang:.4f}° about {fv(ax_here)}\n"
             f"  length: {length:.3f} µs; end point r(T) = {fv(r_end, 3)} µs, |r(T)| = {np.linalg.norm(r_end):.3e} µs\n"
@@ -1145,6 +1157,7 @@ class PulseSequenceAnalyzerQt(QMainWindow):
             result = self.latest_result or self.update_analysis()
             if result is None:
                 return
+            self._draw_curve_plots(all_plots=True)              # the export saves the error-curve figure
 
             output_dir = self.next_numbered_dir(
                 self.export_directory_edit.text(),
@@ -1209,6 +1222,7 @@ class PulseSequenceAnalyzerQt(QMainWindow):
                 result = self.update_analysis()
                 if result is None:
                     continue
+                self._draw_curve_plots(all_plots=True)
 
                 output_dir = os.path.join(base_output_dir, ps_name.replace(".bruker", ""))
 

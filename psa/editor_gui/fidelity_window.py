@@ -88,8 +88,11 @@ class FidelityPanel(QWidget):
     """The fidelity analysis (inputs, Refresh, map and cuts) as a widget: in the editor's fidelity window and in
     the analyzer's Stability tab. Call ``shutdown()`` before it is destroyed (ends the worker process)."""
 
-    def __init__(self, pulse_provider, parent=None, goal_provider=None):
+    def __init__(self, pulse_provider, parent=None, goal_provider=None, with_grape=True):
+        """with_grape=False (analyzer main window): only the pulse's own gate, UR and PP as references (default:
+        the own gate); no GRAPE goal."""
         super().__init__(parent)
+        self.with_grape = with_grape
         self.pulse_provider = pulse_provider          # callable() -> PulseSequence or None
         self.goal_provider = goal_provider            # callable() -> (GRAPE gate goal or None, active)
         self.result = None                            # last result (+ the settings it was computed with)
@@ -158,6 +161,15 @@ class FidelityPanel(QWidget):
         self._ref_edited = False
         for sp in [self.angle_spin] + self.axis_spins + self.m0_spins + self.mt_spins:
             sp.valueChanged.connect(self._mark_ref_edited)
+        if not with_grape:                            # no GRAPE: hide "automatic" and "GRAPE goal", own gate first
+            view = self.ref_box.view()
+            for i in (AUTO, GOAL):
+                view.setRowHidden(i, True)
+                self.ref_box.model().item(i).setEnabled(False)
+            self.ref_box.setCurrentIndex(OWN)
+            self.ref_box.setToolTip("what the pulse should do: its own gate at 0 kHz / 100 %, a UR rotation or a PP "
+                                    "transfer (set below). F = (3 + tr(Rt^T R))/6 (UR, own) or (1 + R m0 · target)/2 "
+                                    "(PP); taken at Refresh")
         self.ref_box.currentIndexChanged.connect(self._ref_changed)
         outer.addLayout(sf)
 

@@ -493,8 +493,22 @@ def test_main_window_facts_plots_and_stability():
     cur = main.current_pulse()
     assert cur.N == 100 and np.allclose(cur.amplitude, ps.amplitude) and cur.umax == 1e4
     assert main.ps_matrix_text.toPlainText().splitlines()[2].split()[2:] == ["100.000000", "0.000000"]
-    assert len(main.ps_plot.figure.axes) == 4
+    assert main.tabs.currentWidget() is main.error_plot and main.error_plot not in main._pending_plots
+    assert main.trajectory_plot in main._pending_plots and main.torsion_plot in main._pending_plots
+    main.tabs.setCurrentWidget(main.trajectory_plot)                # drawn when shown
+    assert main.trajectory_plot not in main._pending_plots and len(main.trajectory_plot.ax.lines) == 1
+    main._draw_curve_plots(all_plots=True); assert not main._pending_plots
+    assert main._plots_dirty                                       # plots only drawn when visible
+    main.tabs.setCurrentWidget(main.ps_subtabs); main.ps_subtabs.setCurrentWidget(main.ps_plot)
+    assert len(main.ps_plot.figure.axes) == 4 and not main._plots_dirty
+    main.offset_spin.setValue(1.0); main.update_analysis()          # same pulse: no redraw
+    assert not main._plots_dirty
+    main.offset_spin.setValue(0.0); main.tabs.setCurrentIndex(0)
     sp = main.stability_panel
+    from psa.editor_gui.fidelity_window import AUTO, GOAL, OWN
+    assert sp.ref_box.currentIndex() == OWN and sp.reference()[0] == {"kind": "own"}
+    assert all(sp.ref_box.view().isRowHidden(i) and not sp.ref_box.model().item(i).isEnabled() for i in (AUTO, GOAL))
+    assert not sp.free_widget.isHidden()                                   # freedom row of the own reference
     sp.map_off[2].setValue(11); sp.map_amp[2].setValue(3); sp.cut_off_range[2].setValue(21); sp.cut_amp_range[2].setValue(5)
     sp.refresh_button.click(); wait_until(lambda: not sp.busy, 120)
     assert sp.result is not None and sp.result["map"].shape == (3, 11), sp.status.text()

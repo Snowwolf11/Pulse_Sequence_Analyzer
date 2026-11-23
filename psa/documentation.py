@@ -47,8 +47,8 @@ Note: torsion is only accurate when `inpoFact = 1` (the default).
 Stability Window (PySide6)
 The fidelity analysis of the editor (see "Fidelity analysis window" below): fidelity over offset ×
 amplitude as 3D surface or heat map with ranges and resolution, cuts at a fixed amplitude / offset,
-reference own gate / GRAPE gate goal (if the editor is open) / UR / PP, optional free or linear phase;
-computed on Refresh in a separate process. The pulse is the one of the main window (nominal amplitude).
+reference the pulse's own gate (default) / UR / PP, optional free or linear phase; computed on Refresh in
+a separate process. Only the main window's pulse (nominal amplitude); no GRAPE goal here.
 
 Stability Window (Tkinter / Dash)
 - Choose pulse type: **State-to-State (SS)** or **Universal Rotation (UR)**.

@@ -304,7 +304,7 @@ Playback buttons automatically sweep parameters to visualize curve evolution dyn
 
 Open the Stability tab. In the PySide6 GUI it is the fidelity analysis of the editor: fidelity over
 offset × amplitude (3D surface or heat map, ranges and resolution), cuts at a fixed amplitude / offset,
-reference own gate / UR / PP (or the GRAPE gate goal when the editor is open), optional free or linear
+reference the pulse's own gate (default) / UR / PP, optional free or linear
 phase; click **Refresh**. (Tkinter / Dash: amplitude range, offset range, mode, then Calculate Stability.)
 
 ---
