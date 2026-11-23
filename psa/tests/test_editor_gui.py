@@ -787,6 +787,89 @@ def test_grape_point_editor():
     ed.close(); w.close()
 
 
+def test_fidelity_window():
+    """⊕ on the panel opens the fidelity window; Refresh computes map and cuts in a worker process (a new
+    Refresh replaces a running one), also while a GRAPE optimization runs; pulse changes mark it outdated."""
+    from psa.design.fidelity import infidelity_grid
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    tab.source_box.setCurrentText("rectangular"); tab.dur_spin.setValue(150.0); tab.load_button.click(); process(20)
+    wait_panel(w)
+    w.panel.fid_expand.click(); process(50)
+    fw = w.panel.fidelity_window
+    assert fw.isVisible() and fw.result is None and "Refresh" in fw.status.text()
+    fw.map_off[2].setValue(21); fw.map_amp[2].setValue(7); fw.cut_off_range[2].setValue(51); fw.cut_amp_range[2].setValue(31)
+    # invalid range: readable error, nothing starts
+    fw.map_amp[0].setValue(130.0); fw.refresh_button.click()
+    assert not fw.busy and "range" in fw.status.text()
+    fw.map_amp[0].setValue(80.0)
+    # a big job replaced at once by a small one: only the second result arrives
+    fw.map_off[2].setValue(2001); fw.refresh_button.click(); assert fw.busy
+    fw.map_off[2].setValue(21); fw.refresh_button.click()
+    wait_until(lambda: not fw.busy, 120)
+    r = fw.result
+    assert r is not None and r["id"] == 2 and r["map"].shape == (7, 21), fw.status.text()
+    assert r["cut_offset"].shape == (51,) and r["cut_amp"].shape == (31,) and fw.status.text().startswith("computed")
+    ps = tab.start_pulse
+    assert np.allclose(r["map"], infidelity_grid(ps, np.linspace(-10e3, 10e3, 21), np.linspace(0.8, 1.2, 7)))
+    x, y = fw.cut_off_curve.getData()
+    assert len(x) == 51 and np.allclose(y, np.log10(np.maximum(r["cut_offset"], 1e-16)))
+    fw.quantity_box.setCurrentIndex(1)                     # F instead of log10(1 - F): no recompute
+    assert np.allclose(fw.cut_off_curve.getData()[1], 1 - r["cut_offset"])
+    fw.view_box.setCurrentIndex(1); process(20)            # heat map
+    assert fw.map_info.text().startswith("worst 1 − F")
+    # references: automatic = the GRAPE gate goal while the GRAPE tab is shown / optimizing, else the own gate
+    from psa.editor_gui.fidelity_window import AUTO, GOAL, OWN, PP, UR
+    assert fw.ref_box.currentIndex() == AUTO
+    tab.angle_spin.setValue(90.0); tab.axis_spins[0].setValue(0.0); tab.axis_spins[1].setValue(1.0)
+    assert fw.reference()[0] == {"kind": "UR", "axis": [0.0, 1.0, 0.0], "angle": 90.0}
+    assert "GRAPE gate goal: UR 90° about (0, 1, 0)" in fw.reference()[1]
+    w.show_tab(w.text_tab)
+    assert fw.reference()[0] == {"kind": "own"}
+    fw.ref_box.setCurrentIndex(GOAL)                       # explicit: the GRAPE goal from any tab
+    assert fw.reference()[0]["angle"] == 90.0
+    tab.gate_box.setCurrentIndex(2)                        # PP goal
+    assert fw.reference()[0] == {"kind": "PP", "m0": [0.0, 0.0, 1.0], "mt": [1.0, 0.0, 0.0]}
+    tab.gate_box.setCurrentIndex(0)
+    try:
+        fw.reference()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("GRAPE goal without a gate goal accepted")
+    fw.refresh_button.click()
+    assert not fw.busy and "no gate goal" in fw.status.text()
+    tab.gate_box.setCurrentIndex(1)
+    fw.ref_box.setCurrentIndex(UR)                         # the UR inputs start from the GRAPE goal
+    assert fw.angle_spin.value() == 90.0 and fw.axis_spins[1].value() == 1.0
+    fw.angle_spin.setValue(45.0)
+    assert fw.reference()[0]["angle"] == 45.0 and fw.reference()[1] == "UR 45° about (0, 1, 0)"
+    fw.ref_box.setCurrentIndex(PP)
+    assert fw.reference()[0]["kind"] == "PP"
+    fw.ref_box.setCurrentIndex(OWN)
+    assert fw.reference()[0] == {"kind": "own"}
+    fw.ref_box.setCurrentIndex(AUTO)
+    w.show_tab(tab)
+    # refresh while GRAPE optimizes: both finish; automatic uses the running optimization's gate goal
+    w.solver_settings.stop_when_solved = False
+    tab.solve_button.click(); assert tab.solving
+    w.show_tab(w.text_tab)                                 # still the GRAPE goal: it is optimizing
+    fw.refresh_button.click()
+    wait_until(lambda: not fw.busy, 120)
+    assert fw.result["id"] == 3 and fw.result["job"]["reference"] == {"kind": "UR", "axis": [0.0, 1.0, 0.0], "angle": 90.0}
+    assert "reference: GRAPE gate goal: UR 90°" in fw.status.text() and tab.solving
+    w.show_tab(tab)                                        # the panel follows the shown tab's pulse
+    wait_until(lambda: tab._history or not tab.solving, 60)
+    tab.solve_button.click(); wait_until(lambda: not tab.solving, 30)
+    wait_panel(w)
+    assert "the pulse has changed since" in fw.status.text()
+    proc = fw._proc
+    fw.close(); process(20)
+    assert fw._proc is None and not proc.is_alive()
+    w.close()
+
+
 def test_grape_tab_quick_mode():
     """Quick mode: only gate, duration, band, limits and time budget; runs the study recipe for the budget and
     keeps the best pulse within the rate limits."""

@@ -7,7 +7,7 @@ import traceback
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QTimer, Signal
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+from PySide6.QtWidgets import (QToolButton, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
                                QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget)
 
 from psa.design import metrics
@@ -69,6 +69,14 @@ class SummaryPanel(QWidget):
         self.fid_log = QCheckBox("log10(1-F)"); self.fid_log.setChecked(True)
         for w in (self.fid_check, self.fid_range, self.fid_log):
             row.addWidget(w)
+        self.fid_expand = QToolButton(); self.fid_expand.setText("⊕")
+        self.fid_expand.setStyleSheet("QToolButton { font-size: 16px; padding: 0 4px; }")
+        self.fid_expand.setToolTip("fidelity analysis window: fidelity vs. offset and amplitude (3D / heat map) and "
+                                   "cuts at a fixed amplitude / offset; computed on Refresh")
+        self.fid_expand.clicked.connect(self.open_fidelity_window)
+        self.fidelity_window = None
+        self.goal_provider = None                    # callable() -> (GRAPE gate goal or None, active), set by the window
+        row.addStretch(); row.addWidget(self.fid_expand)
         fl.addLayout(row)
         self.fid_plot = make_plot("log10(1-F)", "offset [kHz]")
         self.fid_plot.setMinimumHeight(150)
@@ -131,6 +139,15 @@ class SummaryPanel(QWidget):
     def set_pulse(self, pulse):
         self.pulse = pulse
         self.schedule()
+        if self.fidelity_window is not None:
+            self.fidelity_window.pulse_changed(pulse)
+
+    def open_fidelity_window(self):
+        if self.fidelity_window is None:
+            from psa.editor_gui.fidelity_window import FidelityWindow
+            self.fidelity_window = FidelityWindow(lambda: self.pulse, self,
+                                                  goal_provider=lambda: self.goal_provider() if self.goal_provider else (None, False))
+        self.fidelity_window.show(); self.fidelity_window.raise_(); self.fidelity_window.activateWindow()
 
     def schedule(self, *args):
         self._timer.start()

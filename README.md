@@ -347,7 +347,9 @@ left and a live panel on the right; its **Help** button explains everything in d
 
 The panel shows the gate (rotation angle and axis), the robustness against detuning to first, second and
 third order (end point, area and third-order term of the error curve), the first-order robustness against
-amplitude (B1) scaling, the error curve in 3D and the fidelity vs. offset. Pulses are saved as CSV or Bruker
+amplitude (B1) scaling, the error curve in 3D and the fidelity vs. offset; ⊕ opens a fidelity analysis window
+(fidelity vs. offset × amplitude as 3D surface or heat map, plus cuts at fixed amplitude / offset, computed on
+Refresh in a separate process). Pulses are saved as CSV or Bruker
 shape files and can be sent directly to the analyzer.
 
 **Solver.** In the Waveform, Curve families and Curve builder tabs a solver adjusts free variables

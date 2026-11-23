@@ -19,6 +19,30 @@ BAD = "#ef4444"
 pg.setConfigOptions(antialias=True, background=PANEL_BG, foreground=TEXT_FG)
 
 
+BLAS_THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+                    "NUMEXPR_NUM_THREADS")
+
+
+def spawn_single_blas(ctx, target, args, n=1):
+    """Start n processes of ``target(*args)`` with single-threaded BLAS (several multithreaded workers
+    oversubscribe the cores: ~8x the CPU time and slower)."""
+    import os
+    saved = {k: os.environ.get(k) for k in BLAS_THREAD_VARS}
+    try:
+        for k in BLAS_THREAD_VARS:
+            os.environ[k] = "1"
+        procs = [ctx.Process(target=target, args=args, daemon=True) for _ in range(n)]
+        for p in procs:
+            p.start()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return procs
+
+
 def make_plot(y_label, x_label="time [µs]", y_units=None):
     w = pg.PlotWidget()
     w.showGrid(x=True, y=True, alpha=0.25)

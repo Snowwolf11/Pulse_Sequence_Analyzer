@@ -93,6 +93,16 @@ Shared panel (right)
   Values below 1e-6 are shown in green. All values are exact for the sub-pulse sequence (Magnus terms).
 - 3D view of the error curve (start green, end red) and the gate fidelity vs. offset relative to the
   on-resonance gate ("live" can be switched off for long pulses).
+- ⊕ (next to the fidelity plot) opens the fidelity analysis window: fidelity vs. offset and amplitude
+  (3D surface or heat map; offset and amplitude range and number of points settable), and below it
+  fidelity vs. offset at a fixed amplitude and vs. amplitude at a fixed offset. Reference: automatic
+  (default: the gate goal of the GRAPE tab while it optimizes or is shown, else the pulse's own gate at
+  0 kHz / 100 % as in the panel), or fixed: the own gate, the GRAPE gate goal, or a UR rotation (angle,
+  axis) / PP transfer (m0 → target) set in the window (prefilled from the GRAPE goal). The line below the
+  choice and the status after Refresh name the reference used. Shown as log10(1 − F) or F,
+  with worst / mean infidelity and the fraction below 1e-3 / 1e-4 / 1e-5. Not live: Refresh takes the
+  current pulse and computes in a separate process (the window does not block and does not interfere with
+  a running optimization; a new Refresh replaces a running one). A note appears when the pulse changed.
 - Output: file path and format (CSV or Bruker shape file; the extension decides). "Save + plot in main
   window" saves the pulse and loads it in the analyzer.
 

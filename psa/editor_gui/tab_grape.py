@@ -27,7 +27,7 @@ from psa.design.optimize import SolverSettings
 from psa.design.points import format_values, grid_points, is_grid, parse_values
 from psa.design.pulse import PulseSequence
 from psa.design.quick import QuickRun, quick_config, rectangular_start
-from psa.editor_gui.widgets import ACCENT, ACCENT_2, BAD, GOOD, MUTED_FG, lock_heights, make_plot
+from psa.editor_gui.widgets import ACCENT, ACCENT_2, BAD, GOOD, MUTED_FG, lock_heights, make_plot, spawn_single_blas
 
 START_COLORS = ("#f59e0b", "#a78bfa", "#34d399", "#f472b6", "#60a5fa", "#fbbf24", "#f87171", "#2dd4bf")
 SOURCES = ("Text tab", "Waveform tab", "Curve families tab", "Curve builder tab", "Import curve tab",
@@ -43,8 +43,6 @@ PRESET_TIPS = {
     "custom": "your own values (Advanced…)",
 }
 DEAD_PEN = pg.mkPen("#6b7280", width=0.7)
-BLAS_THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
-                    "NUMEXPR_NUM_THREADS")
 QUICK_TIP = ("Quick mode: give the gate, duration, bandwidth and a time budget; the rest is the recipe of the "
              "quick-settings study: broadband grid (2 points per 1/T), spline controls (one per 6 µs), smoothness "
              "1e-6, 22 starts (one screening round, the best third continues), rate limits switched on in a last "
@@ -54,22 +52,8 @@ QUICK_TIP = ("Quick mode: give the gate, duration, bandwidth and a time budget; 
 
 
 def start_workers(ctx, n, args):
-    """Spawn n grape_worker processes with single-threaded BLAS (n multithreaded workers oversubscribe the
-    cores: a slice then costs ~8× the CPU time and runs slower)."""
-    saved = {k: os.environ.get(k) for k in BLAS_THREAD_VARS}
-    try:
-        for k in BLAS_THREAD_VARS:
-            os.environ[k] = "1"
-        procs = [ctx.Process(target=grape_worker, args=args, daemon=True) for _ in range(n)]
-        for p in procs:
-            p.start()
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-    return procs
+    """Spawn n grape_worker processes (single-threaded BLAS, see widgets.spawn_single_blas)."""
+    return spawn_single_blas(ctx, grape_worker, args, n)
 
 
 class ExplorationDialog(QDialog):
@@ -531,6 +515,22 @@ class GrapeTab(QWidget):
         st = self.settings_provider() if self.settings_provider else None
         st = st or SolverSettings()
         return {"offset_khz": st.point_grid_offset_khz, "b1_percent": st.point_grid_b1_percent}
+
+    def goal_reference(self):
+        """The gate goal as a fidelity reference ({"kind": "UR", "axis", "angle"} / {"kind": "PP", "m0", "mt"}),
+        or None if there is none. While optimizing: the goal of the running optimization."""
+        cfg = getattr(self, "_cfg", None) if self.solving else None
+        if cfg is not None:
+            gate, axis, angle, m0, mt = cfg.gate, cfg.target_axis, cfg.target_angle_deg, cfg.m0, cfg.m_target
+        else:
+            gate = ("none", "UR", "PP")[self.gate_box.currentIndex()]
+            axis, angle = [s.value() for s in self.axis_spins], self.angle_spin.value()
+            m0, mt = [s.value() for s in self.m0_spins], [s.value() for s in self.mt_spins]
+        if gate == "UR" and any(abs(v) > 0 for v in axis):
+            return {"kind": "UR", "axis": list(map(float, axis)), "angle": float(angle)}
+        if gate == "PP" and any(abs(v) > 0 for v in m0) and any(abs(v) > 0 for v in mt):
+            return {"kind": "PP", "m0": list(map(float, m0)), "mt": list(map(float, mt))}
+        return None
 
     def _background_source(self):
         """(current pulse, GrapeConfig with the gate goal) for the point editor's infidelity map, or None."""

@@ -60,6 +60,7 @@ class PulseEditorWindow(QMainWindow):
         self.builder_tab = BuilderTab(dt, umax)
         self.import_tab = ImportTab(dt, umax)
         self.grape_tab = GrapeTab(dt, umax)
+        self.panel.goal_provider = self._grape_goal
         self._tab_list = []                      # inner tab widgets, in tab order
         for tab, title in ((self.text_tab, "Text"), (self.waveform_tab, "Waveform"),
                            (self.families_tab, "Curve families"), (self.builder_tab, "Curve builder"),
@@ -139,6 +140,8 @@ class PulseEditorWindow(QMainWindow):
             if hasattr(tab, "solver_box"):
                 tab.solver_box.stop(wait=True)
         self.grape_tab.stop(wait=True)
+        if self.panel.fidelity_window is not None:
+            self.panel.fidelity_window.close()
         super().closeEvent(event)
 
     def all_tabs(self):
@@ -180,6 +183,12 @@ class PulseEditorWindow(QMainWindow):
         ps = self.text_tab.current_pulse()
         if ps is not None:
             self.waveform_tab.load_pulse(ps)
+
+    def _grape_goal(self):
+        """(gate goal of the GRAPE tab or None, whether it is the natural reference now: the GRAPE tab is
+        optimizing or shown)."""
+        tab = self.grape_tab
+        return tab.goal_reference(), tab.solving or self.current_tab() is tab
 
     def _grape_start(self, source):
         tabs = {"Text tab": self.text_tab, "Waveform tab": self.waveform_tab, "Curve families tab": self.families_tab,
