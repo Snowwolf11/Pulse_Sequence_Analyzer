@@ -37,11 +37,14 @@ class SolverSettings:
     diff_step: float = 0.0               # finite-difference relative step (0 = scipy default ~1.5e-8)
     solved_tolerance: float = TOLERANCE  # "solved": every robustness goal below this
     gate_tolerance_deg: float = 1e-5     # "solved": gate error below this
+    gate_infidelity_tolerance: float = 1e-12  # GRAPE "solved": gate infidelity below this at every point
     weight_order1: float = 1.0
     weight_order2: float = 1.0
     weight_order3: float = 1.0
     weight_gate: float = 1.0
     weight_b1: float = 1.0
+    point_grid_offset_khz: float = 0.1  # GRAPE point editor: lock-to-grid step of the offset (0 = off)
+    point_grid_b1_percent: float = 0.5  # GRAPE point editor: lock-to-grid step of B1 (0 = off)
 
     def to_dict(self):
         return dict(self.__dict__)

@@ -12,7 +12,7 @@ from psa.design import metrics
 from psa.design.grape import (GrapeConfig, GrapeProblem, Search, control_noise, exploration_preset, optimize,
                                optimize_multistart, propagator_and_gradient, rotation_with_gradient, run_task, search,
                                spline_basis, stage_plan, lawson_update, band_infidelity,
-                               band_quality)
+                               band_quality, area_quality)
 from psa.design.optimize import SolverSettings
 from psa.design.pulse import PulseSequence
 from psa.rotations import propagate_batch, quaternion_to_matrix
@@ -40,6 +40,10 @@ CONFIGS = {
                                             max_phase_rate_khz=50),
     "spline controls + limits": GrapeConfig(mode="local", offsets_hz=[1000.0], orders=[1, 2], gate="PP", controls="spline",
                                             n_spline=9, max_amp_rate=5, max_phase_rate_khz=5, smooth_weight=0.01),
+    "local weighted points at scalings": GrapeConfig(mode="local", points=[[-1e3, 0.9, 1.0], [2e3, 1.1, 3.0]],
+                                                     orders=[1, 2], b1=True, gate="UR"),
+    "broadband weighted points": GrapeConfig(mode="broadband", points=[[-1e3, 0.95, 2.0], [0.0, 1.0, 1.0], [4e3, 1.05, 0.5]],
+                                             gate="PP"),
 }
 
 
@@ -330,6 +334,113 @@ def test_config_validation():
             continue
         raise AssertionError(bad)
     assert GrapeConfig.from_dict(GrapeConfig(offsets_hz=[1.0, 2.0]).to_dict()).offsets_hz == [1.0, 2.0]
+
+
+def _goals(ps, **kw):
+    prob = GrapeProblem(ps, GrapeConfig(**kw))
+    r, J, _ = prob.goals(prob.x0)
+    return r, J, prob
+
+
+def test_explicit_points_reproduce_the_default_points():
+    """points = the default points (weights 1, or all equal) gives exactly the old residuals in both modes."""
+    ps = random_pulse(50, 4)
+    loc = dict(mode="local", offsets_hz=[-2e3, 0.0, 1e3], orders=[1, 2], b1=True, gate="UR")
+    bb = dict(mode="broadband", bb_offset_min_hz=-4e3, bb_offset_max_hz=4e3, bb_offset_n=5, bb_scale_min=0.9,
+              bb_scale_max=1.1, bb_scale_n=3, gate="PP")
+    for d in (loc, bb):
+        r0, J0, p0 = _goals(ps, **d)
+        pts = [[o, s, 3.0] for o, s, _ in p0.cfg.point_list()]
+        r1, J1, p1 = _goals(ps, **dict(d, points=pts, offsets_hz=[7.0], bb_offset_n=2))   # old fields ignored
+        assert np.array_equal(r0, r1) and np.array_equal(J0, J1) and p1.user_w is None
+        assert p1.cfg.n_points() == len(pts)
+
+
+def test_point_weights_and_scalings():
+    ps = random_pulse(50, 5)
+    pts = [[-2e3, 1.0, 1.0], [0.0, 1.0, 1.0], [2e3, 1.0, 4.0]]          # normalized: 0.5, 0.5, 2
+    r0, _, p0 = _goals(ps, mode="broadband", points=[p[:2] for p in pts], gate="UR")
+    r1, _, p1 = _goals(ps, mode="broadband", points=pts, gate="UR")
+    n = len(r0) // 3
+    assert np.allclose(r1[:2 * n], r0[:2 * n] * math.sqrt(0.5)) and np.allclose(r1[2 * n:], r0[2 * n:] * math.sqrt(2))
+    assert np.allclose(p1.point_errors, p0.point_errors * np.sqrt([0.5, 0.5, 2]))   # Lawson sees weighted errors
+    # local goals at amplitude scaling s = the goals of the pulse with s x the amplitude at scaling 1
+    s = 0.85
+    scaled = PulseSequence(ps.amplitude * s, ps.phase, ps.dt, ps.umax)
+    for kw in (dict(orders=[1, 2, 3], b1=False, gate="UR"), dict(orders=[1], b1=True, gate="PP")):
+        ra, _, _ = _goals(ps, mode="local", points=[[1e3, s]], **kw)
+        rb, _, _ = _goals(scaled, mode="local", offsets_hz=[1e3], **kw)
+        assert np.allclose(ra, rb, atol=1e-12), kw
+    for bad in ([[0.0, -1.0]], [[0.0, 1.0, 0.0]], [[0.0, 1.0, 1.0, 5.0]]):
+        try:
+            GrapeConfig(mode="broadband", points=bad).check()
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted points {bad}")
+
+
+def test_weighted_points_optimize():
+    """An optimization with weighted explicit points runs (gradients consistent) and favours the heavy point."""
+    ps = PulseSequence(np.full(200, 100.0), np.zeros(200), DT, UMAX)
+    st = SolverSettings(max_nfev=150)
+    res = {}
+    for w in (1.0, 50.0):
+        cfg = GrapeConfig(mode="broadband", points=[[-3e3, 1.0, 1.0], [0.0, 1.0, 1.0], [3e3, 1.0, w]], gate="UR",
+                          target_angle_deg=90, seed=1)
+        out, info = optimize(ps, cfg, st)
+        res[w] = band_infidelity(out, cfg, [3e3])[0]
+    assert res[50.0] <= res[1.0] * 1.01 + 1e-12, res
+
+
+def test_one_goal_builder_normalized_by_the_points():
+    """Gate only gives the same residual in both modes; all goal rows are divided by sqrt(number of points),
+    so duplicating every point leaves the squared residual unchanged (a mean, not a sum)."""
+    ps = random_pulse(40, 7)
+    pts = [[-2e3, 0.95, 1.0], [1e3, 1.05, 1.0]]
+    for gate in ("UR", "PP"):
+        rl, Jl, _ = _goals(ps, mode="local", points=pts, orders=[], gate=gate)
+        rb, Jb, _ = _goals(ps, mode="broadband", points=pts, gate=gate)
+        assert np.allclose(rl, rb, rtol=1e-14, atol=1e-16) and np.allclose(Jl, Jb, rtol=1e-14, atol=1e-16)
+    for kw in (dict(mode="local", orders=[1, 2], b1=True, gate="UR"), dict(mode="broadband", gate="PP")):
+        r1, _, _ = _goals(ps, points=pts, **kw)
+        r2, _, _ = _goals(ps, points=pts + pts, **kw)
+        assert abs(r1 @ r1 - r2 @ r2) < 1e-12 * (r1 @ r1), kw
+    # weights: sqrt(w_i / sum w); doubling all weights changes nothing
+    r1, _, _ = _goals(ps, mode="local", points=[p[:2] + [1.0] for p in pts], orders=[1], gate="UR")
+    r2, _, _ = _goals(ps, mode="local", points=[p[:2] + [2.0] for p in pts], orders=[1], gate="UR")
+    assert np.array_equal(r1, r2)
+
+
+def test_unified_solved_rule():
+    """Gate: worst infidelity at the points below gate_infidelity_tolerance (both modes); the gate error in
+    degrees is only information."""
+    ps = random_pulse(40, 8)
+    for mode in ("local", "broadband"):
+        prob = GrapeProblem(ps, GrapeConfig(mode=mode, points=[[0.0, 1.0], [2e3, 1.0]], orders=[], gate="UR"))
+        _, _, summ = prob.goals(prob.x0)
+        assert {"max infidelity", "mean infidelity", "gate error [°]"} <= set(summ)
+        assert summ["max infidelity"] >= summ["mean infidelity"] > 0
+        R = quaternion_to_matrix(propagate_batch(ps.as_array(), DT, UMAX, np.array([0.0, 2e3])))
+        Rt = prob.Rt
+        assert abs(summ["max infidelity"] - max(1 - (3 + np.trace(Rt.T @ r)) / 6 for r in R)) < 1e-14
+        prob.st.gate_infidelity_tolerance = summ["max infidelity"] * 1.001
+        assert prob.reached(summ)
+        prob.st.gate_infidelity_tolerance = summ["max infidelity"] * 0.999
+        prob.st.gate_tolerance_deg = 1e9                     # the degree tolerance is not used by GRAPE
+        assert not prob.reached(summ)
+
+
+def test_area_quality():
+    ps = random_pulse(60, 9)
+    cfg = GrapeConfig(mode="broadband", points=[[-3e3, 0.9], [2e3, 1.1], [0.0, 1.0]], gate="UR")
+    q = area_quality(ps, cfg, n_offsets=31, n_b1=5)
+    assert q["grid"] == (5, 31) and -3 <= q["worst at offset [kHz]"] <= 2 and 90 <= q["worst at B1 [%]"] <= 110
+    inf = np.array([band_infidelity(ps, cfg, np.linspace(-3e3, 2e3, 31), scale=s) for s in np.linspace(0.9, 1.1, 5)])
+    assert abs(q["worst infidelity"] - inf.max()) < 1e-14 and abs(q["mean infidelity"] - inf.mean()) < 1e-14
+    q1 = area_quality(ps, cfg.replace(points=[[-3e3, 1.0], [2e3, 1.0]]), n_offsets=31)
+    assert q1["grid"] == (1, 31)                                         # one B1 value
+    assert area_quality(ps, cfg.replace(points=[[0.0, 0.9], [0.0, 1.1]])) is None        # no offset range
+    assert area_quality(ps, cfg.replace(mode="local", gate="none", orders=[1])) is None  # no gate goal
 
 
 if __name__ == "__main__":

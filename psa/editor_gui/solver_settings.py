@@ -12,7 +12,11 @@ SCI_FIELDS = (("xtol", "step tolerance (xtol)", "stop when the step is this smal
               ("gtol", "gradient tolerance (gtol)", "stop when the gradient is this small; 0 = off"),
               ("diff_step", "finite-difference step", "relative step for the numerical derivatives (0 = automatic, ≈1.5e-8)"),
               ("solved_tolerance", "'solved' below", "a robustness goal (|A_k|/T^k, |B1|/∫Ω) counts as reached below this"),
-              ("gate_tolerance_deg", "'solved' gate error below [°]", "the target gate counts as reached below this error"))
+              ("gate_tolerance_deg", "'solved' gate error below [°]", "the target gate counts as reached below this error "
+               "(Waveform, Curve families, Curve builder)"),
+              ("gate_infidelity_tolerance", "'solved' gate infidelity below (GRAPE)",
+               "Optimize (GRAPE): the gate goal counts as reached when the infidelity is below this at every point "
+               "(1e-12 ≈ 1.4e-4° rotation error)"))
 WEIGHTS = (("weight_order1", "1st order"), ("weight_order2", "2nd order"), ("weight_order3", "3rd order"),
            ("weight_gate", "target gate"), ("weight_b1", "B1 scaling"))
 
@@ -58,6 +62,18 @@ class SolverSettingsWidget(QWidget):
             self.weights[name] = sp
         layout.addWidget(wbox)
 
+        gbox = QGroupBox("GRAPE point editor: lock to grid")
+        gf = QFormLayout(gbox)
+        self.grid_off_spin = QDoubleSpinBox(); self.grid_off_spin.setRange(0, 1e4); self.grid_off_spin.setDecimals(3)
+        self.grid_off_spin.setSuffix(" kHz"); self.grid_off_spin.setSpecialValueText("off")
+        self.grid_b1_spin = QDoubleSpinBox(); self.grid_b1_spin.setRange(0, 100); self.grid_b1_spin.setDecimals(3)
+        self.grid_b1_spin.setSuffix(" %"); self.grid_b1_spin.setSpecialValueText("off")
+        for sp in (self.grid_off_spin, self.grid_b1_spin):
+            sp.setToolTip("with 'lock to grid' on, points snap to multiples of this step; off = 0")
+        gf.addRow("offset step:", self.grid_off_spin)
+        gf.addRow("B1 step:", self.grid_b1_spin)
+        layout.addWidget(gbox)
+
         self.error = QLabel(""); self.error.setStyleSheet(f"color: {BAD};"); self.error.setWordWrap(True)
         layout.addWidget(self.error)
         reset = QPushButton("Reset solver settings to defaults"); reset.clicked.connect(lambda: self.load(SolverSettings()))
@@ -74,6 +90,7 @@ class SolverSettingsWidget(QWidget):
             e.setText(f"{getattr(s, name):.3g}")
         for name, sp in self.weights.items():
             sp.setValue(getattr(s, name))
+        self.grid_off_spin.setValue(float(s.point_grid_offset_khz)); self.grid_b1_spin.setValue(float(s.point_grid_b1_percent))
         self.error.setText("")
 
     def apply(self) -> str:
@@ -89,6 +106,8 @@ class SolverSettingsWidget(QWidget):
             values[name] = v
         for name, sp in self.weights.items():
             values[name] = sp.value()
+        values["point_grid_offset_khz"] = self.grid_off_spin.value()
+        values["point_grid_b1_percent"] = self.grid_b1_spin.value()
         if not any(values[n] > 0 for n, _ in WEIGHTS):
             return self._fail("at least one weight must be positive")
         for k, v in values.items():

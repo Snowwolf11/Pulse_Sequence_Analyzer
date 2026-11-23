@@ -18,10 +18,14 @@ pulses) refined by GRAPE in rounds; successive halving keeps the best fraction a
 round; optional crossover children of survivors (blends in the control variables, experimental); then kicks
 of the best result (perturb, re-optimize, keep if better, or with a temperature sometimes if worse).
 
-Robustness (choose one):
-    local      Taylor orders of the detuning error (A1..A3, SCQC) and optionally first-order B1 scaling,
-               expanded around each offset of a list (not only 0)
-    broadband  classical GRAPE: the gate goal is required on a grid of offsets x amplitude scalings
+Robustness: goals at a set of points (offset, amplitude scaling, weight). The gate goal is required at
+every point ("order 0"); local mode adds the Taylor orders of the detuning error (A1..A3, SCQC) and
+optionally the first-order B1 error at every point.
+    local      gate + orders (+ B1) at the points; default points: the offsets of a list at scaling 1
+    broadband  classical GRAPE: only the gate at the points (mean infidelity); default points: a grid of
+               offsets x amplitude scalings
+An explicit point list (``points``) replaces the default points in both modes; its weights (normalized to
+mean 1) scale the rows of every point by sqrt(weight) and multiply the Lawson weights.
 Gate goal: none, UR (rotation angle about an axis) or PP (initial magnetization m0 -> target).
 For PP the local robustness terms are the components perpendicular to m0 (A_k x m0): an error rotation
 about m0 does not change the transfer.
@@ -89,6 +93,7 @@ class GrapeConfig:
     coarse_levels: List[int] = field(default_factory=list)   # spline points of coarse stages before the controls
     reweight_rounds: int = 0                     # Lawson rounds: raise the weights of the worst points (0 = off)
     reweight_power: float = 0.5                  # weight update w <- w (e / mean e)^power (1: classic Lawson, may oscillate)
+    points: List[List[float]] = field(default_factory=list)  # explicit points [offset_hz, scale, weight] (empty: defaults)
     start_kind: str = "perturb"                  # set by variant(): "perturb" or "random"
 
     def to_dict(self):
@@ -104,15 +109,23 @@ class GrapeConfig:
             raise ValueError("mode must be 'local' or 'broadband'")
         if self.gate not in ("none", "UR", "PP"):
             raise ValueError("gate must be none, UR or PP")
+        if self.points:
+            for pt in self.points:
+                if not 1 <= len(pt) <= 3 or not all(np.isfinite(float(v)) for v in pt):
+                    raise ValueError("a point is [offset_hz, scale, weight] (scale and weight optional)")
+                if len(pt) > 1 and float(pt[1]) <= 0:
+                    raise ValueError("the amplitude scaling of a point must be positive")
+                if len(pt) > 2 and float(pt[2]) <= 0:
+                    raise ValueError("the weight of a point must be positive")
         if self.mode == "local":
-            if not self.offsets_hz:
+            if not self.offsets_hz and not self.points:
                 raise ValueError("local robustness needs at least one offset")
             if not self.orders and not self.b1 and self.gate == "none":
                 raise ValueError("choose at least one goal (an order, B1 or a gate)")
         else:
             if self.gate == "none":
                 raise ValueError("broadband optimization needs a UR or PP gate goal")
-            if self.bb_offset_n < 1 or self.bb_scale_n < 1:
+            if not self.points and (self.bb_offset_n < 1 or self.bb_scale_n < 1):
                 raise ValueError("the broadband grids need at least one point")
         if self.start_noise < 0 or self.multistart_noise < 0:
             raise ValueError("the start noise must not be negative")
@@ -161,14 +174,29 @@ class GrapeConfig:
         return GrapeConfig.from_dict(d)
 
     def n_points(self):
-        """Number of points that reweighting balances: offsets (local) or grid points (broadband)."""
-        return len(self.offsets_hz) if self.mode == "local" else int(self.bb_offset_n) * int(self.bb_scale_n)
+        """Number of points that reweighting balances."""
+        return len(self.point_list())
 
-    def ensemble(self):
-        """(offset_hz, scale) pairs of the broadband grid."""
+    def point_list(self):
+        """(offset_hz, scale, weight) of every point: the explicit points, else the default points of the mode
+        (local: the offsets at scaling 1; broadband: the offset x scaling grid), weights 1."""
+        if self.points:
+            return [(float(p[0]), float(p[1]) if len(p) > 1 else 1.0, float(p[2]) if len(p) > 2 else 1.0)
+                    for p in self.points]
+        if self.mode == "local":
+            return [(float(o), 1.0, 1.0) for o in self.offsets_hz]
         offs = np.linspace(self.bb_offset_min_hz, self.bb_offset_max_hz, int(self.bb_offset_n))
         scales = np.linspace(self.bb_scale_min, self.bb_scale_max, int(self.bb_scale_n))
-        return [(float(o), float(s)) for o in offs for s in scales]
+        return [(float(o), float(s), 1.0) for o in offs for s in scales]
+
+    def ensemble(self):
+        """(offset_hz, scale) of every point."""
+        return [(o, s) for o, s, _ in self.point_list()]
+
+    def user_weights(self):
+        """Point weights normalized to mean 1, or None if all are equal."""
+        w = np.array([p[2] for p in self.point_list()], float)
+        return None if np.all(w == w[0]) else w / np.mean(w)
 
 
 # ------------------------------------------------------------------ engine ---
@@ -311,7 +339,7 @@ def lawson_update(weights, errors, power=1.0):
 
 # ----------------------------------------------------------------- problem ---
 
-INFO_KEYS = ("mean infidelity", "max amplitude [%]", "max amplitude rate [%/µs]", "max phase rate [kHz]", "roughness",
+INFO_KEYS = ("mean infidelity", "gate error [°]", "max amplitude [%]", "max amplitude rate [%/µs]", "max phase rate [kHz]", "roughness",
              "point error spread")
 SOFT_SCHEDULE = (1.0, 0.1, 0.01, 1e-3, 1e-4, 0.0)      # weights of the soft terms in successive stages
 LIMIT_EXCESS_TOL = 1e-3
@@ -337,7 +365,8 @@ class GrapeProblem:
         self.soft_scale = 1.0
         self.limit_scale = 1.0               # 0 switches the rate limits off (stages before "limits")
         self.point_weights = None            # Lawson weights of the points (offsets / grid points), None = all 1
-        self.point_errors = None             # unweighted goal residual of every point (set by goals)
+        self.point_errors = None             # goal residual of every point, user-weighted (set by goals)
+        self.user_w = config.user_weights()  # user weights of the points (mean 1), None = all equal
         D = sparse.diags([-np.ones(self.N - 1), np.ones(self.N - 1)], [0, 1], shape=(self.N - 1, self.N))
         self.D2 = sparse.block_diag([D, D], format="csr")             # first differences of u_x and u_y
         w0 = self.unsquash(self.x0)
@@ -408,64 +437,73 @@ class GrapeProblem:
         return weight * (m - self.mt) / 2, weight * (dR @ self.m0).T / 2
 
     def goals(self, x, with_jac=True):
-        """Goal residuals (dense) and Jacobian (rows x 2N), plus a summary dict."""
+        """Goal residuals (dense) and Jacobian (rows x 2N), plus a summary dict.
+
+        One builder for every point (offset, scaling): the gate rows (order 0), and in local mode the
+        Taylor orders of the detuning error and the first-order B1 error. All rows are divided by
+        sqrt(number of points) (with user weights: sqrt(w_i / sum w)), so the squared residual is a
+        (weighted) mean over the points and its balance with the soft terms does not depend on how many
+        points there are. Summary: worst gate infidelity ("max infidelity", the solved criterion), mean
+        infidelity and the largest gate error in degrees (info), and the largest |A_k|/T^k, |B1|/(Ω T)."""
         ux, uy = self.controls(x)
         cfg, st = self.cfg, self.st
         rows, jac, summ = [], [], {}
         marks = []                                   # index in rows where each point starts
-        if cfg.mode == "local":
-            K = max(cfg.orders) if cfg.orders else 0
-            for off in cfg.offsets_hz:
-                marks.append(len(rows))
-                X, dX = propagator_and_gradient(ux, uy, self.dt, self.umax, off, 1.0, max(K, 1))
-                if cfg.orders:
-                    mg = magnus_with_gradient(X, dX)
-                    for k in cfg.orders:
-                        A, dA = mg[k - 1]
-                        if cfg.gate == "PP":
-                            A, dA = np.cross(A, self.m0), np.cross(dA, self.m0)
-                        w = st.weight(k) / self.T ** k
-                        rows.append(w * A); jac.append(w * dA.T)
-                        key = f"|A{k}|/T^{k}" + (" ⊥m0" if cfg.gate == "PP" else "")
-                        summ[key] = max(summ.get(key, 0.0), float(np.linalg.norm(A) / self.T ** k))
-                if cfg.b1:
-                    Xa, dXa = propagator_and_gradient(ux, uy, self.dt, self.umax, off, 1.0, 1, "amplitude")
-                    U0d = Xa[0].conj().T
-                    B = _vec(U0d @ Xa[1], 1)
-                    dB = _vec(np.conj(np.swapaxes(dXa[:, 0], -1, -2)) @ Xa[1] + U0d @ dXa[:, 1], 1)
+        pts = cfg.ensemble()
+        local = cfg.mode == "local"
+        orders = list(cfg.orders) if local else []
+        K = max(orders) if orders else 0             # Taylor jets only if an order is wanted
+        norm = 1.0 / math.sqrt(len(pts))
+        inf, gerr = [], []
+        for off, sc in pts:
+            marks.append(len(rows))
+            X, dX = propagator_and_gradient(ux, uy, self.dt, self.umax, off, sc, K)
+            if orders:
+                mg = magnus_with_gradient(X, dX)
+                for k in orders:
+                    A, dA = mg[k - 1]
                     if cfg.gate == "PP":
-                        B, dB = np.cross(B, self.m0), np.cross(dB, self.m0)
-                    norm = 2 * math.pi * self.umax * self.T             # maximal nutation angle
-                    w = st.weight("b1") / norm
-                    rows.append(w * B); jac.append(w * dB.T)
-                    summ["|B1|/(Ω T)"] = max(summ.get("|B1|/(Ω T)", 0.0), float(np.linalg.norm(B) / norm))
-                if cfg.gate != "none":
-                    R, dR = rotation_with_gradient(X[0], dX[:, 0])
-                    r, j = self._gate_rows(R, dR, st.weight("gate"))
-                    rows.append(r); jac.append(j)
-                    err = (rotation_angle_deg(self.Rt.T @ R) if cfg.gate == "UR"
-                           else _angle_between_deg(R @ self.m0, self.mt))
-                    summ["gate error [°]"] = max(summ.get("gate error [°]", 0.0), err)
-        else:
-            ens = cfg.ensemble()
-            w = st.weight("gate") / math.sqrt(len(ens))
-            inf = []
-            for off, sc in ens:
-                marks.append(len(rows))
-                X, dX = propagator_and_gradient(ux, uy, self.dt, self.umax, off, sc, 0)
+                        A, dA = np.cross(A, self.m0), np.cross(dA, self.m0)
+                    w = st.weight(k) / self.T ** k * norm
+                    rows.append(w * A); jac.append(w * dA.T)
+                    key = f"|A{k}|/T^{k}" + (" ⊥m0" if cfg.gate == "PP" else "")
+                    summ[key] = max(summ.get(key, 0.0), float(np.linalg.norm(A) / self.T ** k))
+            if local and cfg.b1:
+                Xa, dXa = propagator_and_gradient(ux, uy, self.dt, self.umax, off, sc, 1, "amplitude")
+                U0d = Xa[0].conj().T
+                B = _vec(U0d @ Xa[1], 1)
+                dB = _vec(np.conj(np.swapaxes(dXa[:, 0], -1, -2)) @ Xa[1] + U0d @ dXa[:, 1], 1)
+                if cfg.gate == "PP":
+                    B, dB = np.cross(B, self.m0), np.cross(dB, self.m0)
+                nut = 2 * math.pi * self.umax * self.T              # maximal nutation angle
+                w = st.weight("b1") / nut * norm
+                rows.append(w * B); jac.append(w * dB.T)
+                summ["|B1|/(Ω T)"] = max(summ.get("|B1|/(Ω T)", 0.0), float(np.linalg.norm(B) / nut))
+            if cfg.gate != "none":
                 R, dR = rotation_with_gradient(X[0], dX[:, 0])
-                r, j = self._gate_rows(R, dR, w)
+                r, j = self._gate_rows(R, dR, st.weight("gate") * norm if local else st.weight("gate") / math.sqrt(len(pts)))
                 rows.append(r); jac.append(j)
-                if cfg.gate == "UR":
-                    inf.append(1 - (3 + np.trace(self.Rt.T @ R)) / 6)
-                else:
-                    inf.append(1 - (1 + float(R @ self.m0 @ self.mt)) / 2)
-            summ["mean infidelity"] = float(np.mean(inf))
+                if cfg.gate == "UR":                 # 1 - (3 + tr(Rt^T R)) / 6 = |R - Rt|_F^2 / 12 (no cancellation)
+                    inf.append(float(np.sum((R - self.Rt) ** 2)) / 12)
+                    gerr.append(rotation_angle_deg(self.Rt.T @ R))
+                else:                                # 1 - (1 + m . mt) / 2 = |m - mt|^2 / 4
+                    m = R @ self.m0
+                    inf.append(float(np.sum((m - self.mt) ** 2)) / 4)
+                    gerr.append(_angle_between_deg(m, self.mt))
+        if inf:
             summ["max infidelity"] = float(np.max(inf))
+            summ["mean infidelity"] = float(np.mean(inf))
+            summ["gate error [°]"] = float(np.max(gerr))
         sizes = np.cumsum([0] + [len(v) for v in rows])
         bounds = [(sizes[a], sizes[b]) for a, b in zip(marks, marks[1:] + [len(rows)])]
         r = np.concatenate(rows) if rows else np.zeros(0)
         Jm = np.vstack(jac) if jac else np.zeros((0, 2 * self.N))
+        uw = self.user_w
+        if uw is not None:                           # user weights: rows of point i x sqrt(w_i)
+            scale = np.ones(len(r))
+            for (a, b), wt in zip(bounds, uw):
+                scale[a:b] = math.sqrt(wt)
+            r, Jm = r * scale, Jm * scale[:, None]
         self.point_errors = np.array([np.linalg.norm(r[a:b]) for a, b in bounds])
         if self.point_weights is not None and len(self.point_weights) == len(bounds):
             scale = np.ones(len(r))
@@ -481,8 +519,8 @@ class GrapeProblem:
         for k, v in summ.items():
             if k in INFO_KEYS:
                 continue
-            if k == "gate error [°]":
-                if v >= st.gate_tolerance_deg:
+            if k == "max infidelity":
+                if v >= st.gate_infidelity_tolerance:
                     return False
             elif k == "rate-limit excess":
                 if v >= LIMIT_EXCESS_TOL:
@@ -858,6 +896,40 @@ def band_quality(ps: PulseSequence, config: GrapeConfig, lo_hz, hi_hz, n=401, th
     return out
 
 
+def area_quality(ps: PulseSequence, config: GrapeConfig, n_offsets=201, n_b1=11, thresholds=(1e-3, 1e-4, 1e-5)):
+    """Gate infidelity on a fine test grid over the area of the point selection (offset range x B1 range;
+    one B1 value if all points have the same scaling). Shows what happens between the points. Returns
+    None without a gate goal or if all points have the same offset; else worst / mean infidelity, the fraction
+    of the area below each threshold, the position of the worst value and the grid size."""
+    if config.gate == "none":
+        return None
+    pts = config.ensemble()
+    offs, scales = [p[0] for p in pts], [p[1] for p in pts]
+    if max(offs) - min(offs) <= 0:
+        return None
+    o = np.linspace(min(offs), max(offs), int(n_offsets))
+    sc = np.linspace(min(scales), max(scales), int(n_b1)) if max(scales) > min(scales) else np.array([scales[0]])
+    inf = np.maximum(np.array([band_infidelity(ps, config, o, scale=s) for s in sc]), 0.0)
+    i, j = np.unravel_index(int(np.argmax(inf)), inf.shape)
+    out = {"worst infidelity": float(inf[i, j]), "mean infidelity": float(np.mean(inf)),
+           "worst at offset [kHz]": float(o[j] / 1e3), "worst at B1 [%]": float(sc[i] * 100), "grid": inf.shape}
+    for t in thresholds:
+        out[f"fraction below {t:g}"] = float(np.mean(inf <= t))
+    return out
+
+
+def pulse_rates(ps: PulseSequence, min_amp=1.0):
+    """Largest amplitude change rate [%/µs] and phase change rate [kHz] of the sampled pulse (phase steps
+    only where both neighbouring sub-pulses have more than ``min_amp`` % amplitude; wrapped to ±180°)."""
+    a = np.asarray(ps.amplitude, float)
+    dt_us = ps.dt * 1e6
+    amp_rate = float(np.max(np.abs(np.diff(a)) / dt_us, initial=0.0))
+    dphi = np.angle(np.exp(1j * np.radians(np.diff(np.asarray(ps.phase, float)))))
+    f = np.abs(dphi) / (2 * math.pi * ps.dt) / 1e3
+    f = np.where((a[:-1] > min_amp) & (a[1:] > min_amp), f, 0.0)
+    return amp_rate, float(np.max(f, initial=0.0))
+
+
 def selection_key(config: GrapeConfig, info):
     """Order of results: reached first; among those the smoothest (if smoothing is on), else the lowest goal
     residual."""
@@ -1154,11 +1226,16 @@ def run_task(task, queue=None, stop_event=None):
         def snapshot(p, cost):
             queue.put(("snapshot", cid, p.amplitude.tolist(), p.phase.tolist(), cost))
 
-        result, info = optimize(ps, GrapeConfig.from_dict(task["config"]), SolverSettings.from_dict(task.get("settings")),
-                                callback, snapshot if queue is not None else None, start_index=task["start_index"],
-                                state=task.get("state"), budget=task.get("budget"))
+        cfg = GrapeConfig.from_dict(task["config"])
+        result, info = optimize(ps, cfg, SolverSettings.from_dict(task.get("settings")),
+                                callback, snapshot if queue is not None and task.get("snapshots", True) else None,
+                                start_index=task["start_index"], state=task.get("state"), budget=task.get("budget"))
         info["history"] = info["history"][-5000:]
-        return {"tid": tid, "cid": cid, "amp": result.amplitude.tolist(), "phase": result.phase.tolist(), "info": info}
+        out = {"tid": tid, "cid": cid, "amp": result.amplitude.tolist(), "phase": result.phase.tolist(), "info": info}
+        if task.get("band") is not None:                 # score on a fine test grid (quick mode)
+            out["band"] = band_quality(result, cfg, *task["band"])
+            out["rates"] = pulse_rates(result)
+        return out
     except Exception as e:
         return {"tid": tid, "cid": cid, "error": f"{type(e).__name__}: {e}"}
 

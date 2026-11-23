@@ -343,7 +343,7 @@ left and a live panel on the right; its **Help** button explains everything in d
 | Curve families | Pick a family (helix, Lissajous knot, torus knot, Clelia curve, custom formula, 2H, 4H, 6H) and change its parameters live. The 6H family is an identity pulse robust to third order in the offset. |
 | Curve builder | Compose the error curve from lines, arcs, helices and Bézier segments with a twist (phase jump) at each junction; edit in 3D and in three projections. |
 | Import curve | Load curve points (x, y, z) or a curvature/torsion table from a CSV / text file. |
-| Optimize (GRAPE) | Optimize every sub-pulse of a start pulse with exact gradients: local robustness (detuning orders and B1 at chosen offsets, as in SCQC) or classical broadband GRAPE, with a UR or PP gate goal. |
+| Optimize (GRAPE) | Optimize every sub-pulse of a start pulse with exact gradients: local robustness (detuning orders and B1 at chosen offsets, as in SCQC) or classical broadband GRAPE, with a UR or PP gate goal; a quick mode (gate, duration, bandwidth, time budget) uses the recipe of the settings study. |
 
 The panel shows the gate (rotation angle and axis), the robustness against detuning to first, second and
 third order (end point, area and third-order term of the error curve), the first-order robustness against
@@ -357,8 +357,11 @@ gate (angle about an axis). It runs in the background and can be stopped at any 
 far is kept). Evaluation limit, tolerances and goal weights are set in Settings → Solver.
 
 **GRAPE.** The Optimize (GRAPE) tab changes every sub-pulse (Cartesian controls) instead of a few
-parameters. Robustness is either *local* (cancel the detuning error terms of chosen orders, and optionally
-the first-order B1 error, around a list of offsets) or *broadband* (the gate on an offset × B1 grid). The
+parameters. The goals hold at a set of points (offset, B1 scaling, weight): an offset × B1 grid typed as
+lists and ranges (`-10:10:21`), or a custom selection drawn in a visual point editor (weights, lock to grid,
+save / load, the infidelity of the current pulse as background). At every point the gate goal is required
+(order 0, i.e. classical broadband GRAPE) and optionally the Taylor orders of the detuning error and the
+first-order B1 error (SCQC). The
 gate goal is none, UR (rotation) or PP (point to point); the 100 % amplitude limit is always kept.
 Optional Lawson reweighting evens out the errors across the offsets / grid points (smaller worst case).
 Against spiky results: a smoothness weight, soft limits of the amplitude and phase rates, or smooth spline
@@ -368,6 +371,10 @@ screening rounds that keep the best candidates and give them more budget, kicks 
 (optionally with a temperature), coarse-to-fine stages and an experimental crossover. All candidates run in
 parallel and the best result is kept. "Stay close to start" regularization is optional. It uses the same solver
 settings.
+A *quick* mode needs only the gate, duration, bandwidth, rate limits and a time budget; it runs the recipe
+found in a settings study (`studies/quick_settings_study.py`: broadband grid, spline controls, 22 starts with
+screening, rate limits in a last stage and a final polish of the 3 best) on all cores and returns the pulse
+with the smallest worst-case infidelity over the band that keeps the limits.
 
 Conventions: on resonance, unit-speed error curve whose length is the pulse duration, curvature = Rabi
 frequency, torsion = phase change rate. Curves are converted into pulses exactly (the pulse reproduces the

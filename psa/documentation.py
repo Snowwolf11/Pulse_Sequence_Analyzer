@@ -160,13 +160,40 @@ importance in the least-squares residual).
 Optimize (GRAPE) tab
 Optimizes every sub-pulse individually (Cartesian controls u_x, u_y per sub-pulse) with exact gradients,
 like classical GRAPE. The duration and the number of sub-pulses stay those of the start pulse.
+- Mode "quick": only the gate goal (UR or PP), the duration, the bandwidth (offset range, kHz), the
+  maximal amplitude / phase rates and a time budget (minutes). Everything else is the recipe of the
+  quick-settings study: rectangular start, broadband grid with 2 points per 1/T, spline controls (one
+  per 6 µs) with a small smoothness weight, 22 starts with one screening round (the best third
+  continues), the rate limits switched on in a last stage, and in the last 20 % of the time the 3 best
+  pulses are re-optimized with the limits. The candidates run in short slices on all cores but one, so
+  the run ends on time. Result: the pulse with the smallest worst-case infidelity over the band (401 test
+  offsets) that keeps the rate limits (5 % tolerance); the status shows its worst / mean infidelity and
+  rates. Stop ends early and keeps the best so far. Tuned for UR gates over ±10 kHz at 10 kHz rf (in
+  the study: 3–4e-4 worst infidelity for 410–450 µs, 2e-5 for 180° in 600 µs, in 20 min; most of it
+  within the first few minutes). Mode "expert" shows all the settings below.
 - Start pulse: the current pulse of another tab, a rectangular pulse (duration, amplitude, phase) or a
   random one (duration, seed); "Load start pulse". "Result → start" continues from the result.
-- Robustness, one of
-  • local (SCQC): cancel the detuning error terms A1/A2/A3 (orders ticked) and optionally the first-order
-    B1 error, expanded around every offset of the list (kHz, comma-separated, e.g. "-3, 0, 3"; the gate
-    goal is then required at every listed offset as well),
-  • broadband (classical GRAPE): the gate goal on a grid of offsets × B1 scalings (mean infidelity).
+- Points and goals: the goals hold at a set of points (offset, B1 scaling, weight).
+  • offsets [kHz] and B1 [%]: values separated by commas; a:b:n gives n evenly spaced values from a to b
+    (e.g. "-10:10:21, 12, 15"). The points are every offset with every B1 value (weight 1).
+  • Edit visually…: a separate window with the offset × B1 plane. Click adds a point (optionally also at
+    −offset), drag moves the selection, drag on empty space selects in a rectangle or fills it with a grid,
+    right click deletes, Shift + wheel changes a point's weight (marker size); exact values in the table.
+    Lock to grid snaps to the steps of Settings → Solver (default 0.1 kHz, 0.5 %). Undo / redo, save / load
+    (JSON or CSV: offset_kHz, B1_percent, weight). Optional background: log10(1 − F) of the current pulse
+    for the gate goal. Apply: a full grid with weights 1 goes back into the fields, anything else is a
+    custom selection ("Back to grid" returns to the fields).
+  • Goals at every point: the gate goal (order 0; with only that, classical broadband GRAPE) plus the
+    ticked offset orders A1/A2/A3 (SCQC) and first-order B1, expanded around every point.
+  • Weights: a point's goal terms count with its weight. All goal terms are divided by √(sum of the
+    weights), so the optimizer minimizes a weighted mean over the points: adding points does not shift
+    the balance against smoothness, stay close and the rate limits. Lawson starts from the weights.
+  • Solved (stop when solved): the gate goal counts as reached when the infidelity is below "'solved' gate
+    infidelity below (GRAPE)" (Settings → Solver, default 1e-12 ≈ 1.4e-4° rotation error) at every point;
+    the orders when |A_k|/T^k and |B1|/(Ω T) are below "'solved' below".
+  • Score over the area (optional, on by default): after the run, the gate infidelity on 201 offsets
+    (× 11 B1 values if the points have several) over the range of the points, i.e. also between them;
+    the status shows the worst value and where it is, the mean and the fraction below 1e-4.
 - Gate goal: none, UR (rotation angle about an axis; the whole rotation) or PP (point to point: initial
   magnetization m0 to a target). For PP the robustness terms only count the error that moves m0.
 - The amplitude limit (100 %) is always kept exactly (built into the parametrization).

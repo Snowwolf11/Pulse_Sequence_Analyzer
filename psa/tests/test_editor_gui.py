@@ -586,16 +586,18 @@ def test_grape_tab_inputs_start_sources_and_stop():
     # invalid inputs give readable errors instead of starting
     tab.offsets_edit.setText("1, x"); tab.solve_button.click()
     assert not tab.solving and "offsets" in tab.status.text()
-    tab.offsets_edit.setText("-2, 2")
-    tab.bb_radio.setChecked(True); tab.gate_box.setCurrentIndex(0); tab.solve_button.click()
-    assert not tab.solving and "gate" in tab.status.text()
-    # broadband PP config from the widgets
+    tab.offsets_edit.setText("-5:5:11")
+    tab.order_checks[1].setChecked(False); tab.gate_box.setCurrentIndex(0); tab.solve_button.click()
+    assert not tab.solving and "goal" in tab.status.text()
+    # gate only = broadband PP config on the offset x B1 grid of the fields
     tab.gate_box.setCurrentIndex(2)
     assert tab.pp_widget.isVisibleTo(tab) and not tab.ur_widget.isVisibleTo(tab)
-    tab.bb_spins["scale"][0].setValue(0.9); tab.bb_spins["scale"][1].setValue(1.1); tab.bb_spins["scale"][2].setValue(3)
+    tab.b1_edit.setText("90:110:3")
+    assert tab.points_info.text().startswith("11 offsets × 3 B1 values = 33 points")
     tab.reg_box.setCurrentIndex(1); tab.reg_weight.setText("0.01")
     cfg = tab.config()
     assert cfg.mode == "broadband" and cfg.gate == "PP" and len(cfg.ensemble()) == 33
+    assert np.allclose(cfg.ensemble()[:3], [(-5e3, 0.9), (-5e3, 1.0), (-5e3, 1.1)])
     assert cfg.regularization == "stay_close" and cfg.regularization_weight == 0.01
     tab.reweight_spin.setValue(4); tab.reweight_power_spin.setValue(0.8)
     cfg = tab.config()
@@ -675,6 +677,149 @@ def test_grape_tab_exploration_presets_and_search():
     assert "kicks 1–2" in text and len(tab.last_infos) == 6 and tab.preset_box.isEnabled()
     out = tab.current_pulse()
     assert metrics.robustness(out)["A1_norm"] < 1e-8 and abs(metrics.gate(out)["angle_deg"] - 180) < 1e-4
+    w.close()
+
+
+def test_grape_tab_points_and_goals():
+    """One point selection (offset × B1 grid of the fields, or custom points with weights); gate only maps to
+    the broadband engine, gate + orders to the local one."""
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    tab.offsets_edit.setText("-3, 0, 3"); tab.b1_edit.setText("95, 105")
+    assert tab.points_info.text().startswith("3 offsets × 2 B1 values = 6 points")
+    cfg = tab.config()
+    assert cfg.mode == "local" and cfg.orders == [1] and cfg.n_points() == 6
+    assert cfg.point_list()[1] == (-3e3, 1.05, 1.0)                 # local orders now also at B1 ≠ 100 %
+    tab.order_checks[1].setChecked(False)
+    assert tab.config().mode == "broadband" and tab.config().n_points() == 6
+    tab.b1_edit.setText("95, 0")
+    assert "positive" in tab.points_info.text()
+    tab.solve_button.click()
+    assert not tab.solving and "positive" in tab.status.text()
+    # custom selection with weights: fields locked, back to grid restores them
+    tab.b1_edit.setText("100")
+    tab.set_points([[-2e3, 1.0, 1.0], [1e3, 0.9, 4.0]])
+    assert not tab.offsets_edit.isEnabled() and tab.grid_button.isVisibleTo(tab)
+    assert tab.points_info.text() == "custom selection: 2 points, weights 1 … 4"
+    cfg = tab.config()
+    assert cfg.point_list() == [(-2e3, 1.0, 1.0), (1e3, 0.9, 4.0)] and np.allclose(cfg.user_weights(), [0.4, 1.6])
+    tab.grid_button.click()
+    assert tab.custom_points is None and tab.offsets_edit.isEnabled() and tab.offsets_edit.text() == "-3, 0, 3"
+    # a selection that is a full grid with weights 1 goes back into the fields
+    tab.set_points([[o * 1e3, b, 1.0] for o in np.linspace(-10, 10, 21) for b in (0.9, 1.0)])
+    assert tab.custom_points is None and tab.offsets_edit.text() == "-10:10:21" and tab.b1_edit.text() == "90, 100"
+    # a short gate-only run reports the score over the area (between the points too)
+    tab.source_box.setCurrentText("rectangular"); tab.dur_spin.setValue(150.0); tab.load_button.click(); process(20)
+    tab.offsets_edit.setText("-1, 1"); tab.b1_edit.setText("100"); tab.angle_spin.setValue(90.0)
+    assert tab.area_check.isChecked()
+    tab.solve_button.click()
+    wait_until(lambda: not tab.solving, 120)
+    text = tab.status.text()
+    assert "area -1 … 1 kHz (201×1 test points): worst infidelity" in text, text
+    assert tab.last_area is not None and tab.last_area["grid"] == (1, 201)
+    w.close()
+
+
+def test_grape_point_editor():
+    """Visual point editor: add (mouse and API), mirror, lock to grid, weights, fill, select / move / delete,
+    undo / redo, save / load, background map, Apply to the tab."""
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    tab.offsets_edit.setText("-2, 2"); tab.b1_edit.setText("100")
+    tab.visual_button.click(); process(50)
+    ed = tab.point_editor
+    assert ed.isVisible() and ed.points() == [[-2e3, 1.0, 1.0], [2e3, 1.0, 1.0]]
+    # a real click on empty space adds a point there
+    ed.view.setRange(xRange=(-10, 10), yRange=(80, 120), padding=0); process(50)
+    QTest.mouseClick(ed.plot.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                     view_to_widget(ed.plot, 5.0, 110.0)); process(20)
+    assert len(ed.pts) == 3 and abs(ed.pts[2][0] - 5.0) < 0.3 and abs(ed.pts[2][1] - 110) < 1.5 and ed.sel == {2}
+    # lock to grid snaps (also the existing points), mirror adds −offset
+    w.solver_settings.point_grid_offset_khz, w.solver_settings.point_grid_b1_percent = 0.5, 1.0
+    ed.lock_check.setChecked(True)
+    assert all(abs(p[0] * 2 - round(p[0] * 2)) < 1e-9 and abs(p[1] - round(p[1])) < 1e-9 for p in ed.pts)
+    ed.mirror_check.setChecked(True); ed.weight_spin.setValue(3.0)
+    ed.add_point(3.14, 95.3)
+    assert [3.0, 95.0, 3.0] in ed.pts and [-3.0, 95.0, 3.0] in ed.pts and len(ed.sel) == 2
+    n = len(ed.pts)
+    ed.undo(); assert len(ed.pts) == n - 2
+    ed.redo(); assert len(ed.pts) == n
+    # select in a rectangle, move (snapped), weight, delete
+    ed.select_in_rect(-4, 90, 4, 99)
+    assert ed.sel == {i for i, p in enumerate(ed.pts) if p[1] == 95.0}
+    ed.move_selected(0.26, 2.2)
+    assert sorted(ed.pts[i][1] for i in ed.sel) == [97.0, 97.0] and {ed.pts[i][0] for i in ed.sel} == {-2.5, 3.5}
+    ed.set_weight_selected(0.5)
+    assert all(ed.pts[i][2] == 0.5 for i in ed.sel)
+    ed.delete_selected(); assert len(ed.pts) == n - 2
+    # fill a rectangle with a grid (no mirror)
+    ed.mirror_check.setChecked(False); ed.weight_spin.setValue(1.0)
+    ed.fill_rect(-1, 90, 1, 110, n_off=3, n_b1=2)
+    assert {(p[0], p[1]) for p in ed.pts} >= {(-1.0, 90.0), (0.0, 110.0), (1.0, 110.0)}
+    # table editing
+    r = ed.pts.index([-1.0, 90.0, 1.0])
+    ed.table.item(r, 2).setText("7"); process(5)
+    assert ed.pts[r][2] == 7.0
+    # save / load round trip (JSON and CSV)
+    with tempfile.TemporaryDirectory() as d:
+        before = ed.points()
+        for name in ("sel.json", "sel.csv"):
+            ed.save(os.path.join(d, name)); ed.delete_selected(); ed.select_all(); ed.delete_selected()
+            assert not ed.pts and not ed.apply_button.isEnabled()
+            ed.load(os.path.join(d, name))
+            assert np.allclose(ed.points(), before), name
+    # background: infidelity of the current pulse for the gate goal
+    offs, b1, z = ed.background_map(21, 5)
+    assert z.shape == (5, 21) and np.all(np.isfinite(z)) and np.all(z <= 1e-9)
+    ed.bg_check.setChecked(True)
+    assert ed.bg_item.isVisible()
+    tab.gate_box.setCurrentIndex(0)
+    assert ed.background_map() is None
+    tab.gate_box.setCurrentIndex(1)
+    # Apply: custom selection in the tab, used by the config
+    ed.apply_button.click(); process(10)
+    assert tab.custom_points is not None and not tab.offsets_edit.isEnabled()
+    cfg = tab.config()
+    assert cfg.n_points() == len(ed.pts) and cfg.user_weights() is not None
+    assert sorted(cfg.point_list()) == sorted((p[0] * 1e3, p[1] / 100, p[2]) for p in ed.pts)
+    ed.close(); w.close()
+
+
+def test_grape_tab_quick_mode():
+    """Quick mode: only gate, duration, band, limits and time budget; runs the study recipe for the budget and
+    keeps the best pulse within the rate limits."""
+    from psa.design.grape import band_quality, pulse_rates
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    assert not tab.quick_box.isVisibleTo(tab) and tab.expert_boxes[0].isVisibleTo(tab)
+    tab.gate_box.setCurrentIndex(0)
+    tab.quick_radio.setChecked(True)
+    assert tab.quick_box.isVisibleTo(tab) and not any(b.isVisibleTo(tab) for b in tab.expert_boxes)
+    assert tab.gate_box.currentIndex() == 1 and tab.gate_box.isVisibleTo(tab)         # quick mode needs a gate
+    tab.q_lo_spin.setValue(5.0); tab.q_hi_spin.setValue(-5.0)
+    tab.solve_button.click()
+    assert not tab.solving and "bandwidth" in tab.status.text()
+    tab.q_lo_spin.setValue(-4.0); tab.q_hi_spin.setValue(4.0)
+    tab.q_dur_spin.setValue(100.0); tab.angle_spin.setValue(90.0); tab.q_budget_spin.setValue(0.5)
+    ps0, cfg, st = tab.quick_setup()
+    assert ps0.N == 200 and cfg.bb_offset_n == 3 and cfg.n_starts == 22 and st.max_nfev == 3000
+    tab.solve_button.click()
+    assert tab.solving and not tab.q_dur_spin.isEnabled() and not tab.expert_radio.isEnabled()
+    wait_until(lambda: not tab.solving, 120)
+    text = tab.status.text()
+    assert text.startswith("quick run finished") and "worst infidelity" in text, text
+    assert tab.last_quick["within_limits"] and tab.last_quick["elapsed_s"] < 30 + 15
+    out = tab.current_pulse()
+    assert out.N == 200 and pulse_rates(out)[0] <= 21 and pulse_rates(out)[1] <= 52.5
+    start_worst = band_quality(ps0, cfg, -4e3, 4e3)["worst infidelity"]
+    assert band_quality(out, cfg, -4e3, 4e3)["worst infidelity"] < start_worst / 10
+    wait_panel(w)
+    assert tab.q_dur_spin.isEnabled() and w.panel.pulse is out
+    tab.expert_radio.setChecked(True)
+    assert tab.expert_boxes[0].isVisibleTo(tab) and not tab.quick_box.isVisibleTo(tab)
     w.close()
 
 
