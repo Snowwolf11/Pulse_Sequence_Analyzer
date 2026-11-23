@@ -730,7 +730,7 @@ def test_grape_point_editor():
     tab.offsets_edit.setText("-2, 2"); tab.b1_edit.setText("100")
     tab.visual_button.click(); process(50)
     ed = tab.point_editor
-    assert ed.isVisible() and ed.points() == [[-2e3, 1.0, 1.0], [2e3, 1.0, 1.0]]
+    assert ed.isVisible() and ed.points() == [[-2e3, 1.0, 1.0, None], [2e3, 1.0, 1.0, None]]
     # a real click on empty space adds a point there
     ed.view.setRange(xRange=(-10, 10), yRange=(80, 120), padding=0); process(50)
     QTest.mouseClick(ed.plot.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
@@ -742,7 +742,7 @@ def test_grape_point_editor():
     assert all(abs(p[0] * 2 - round(p[0] * 2)) < 1e-9 and abs(p[1] - round(p[1])) < 1e-9 for p in ed.pts)
     ed.mirror_check.setChecked(True); ed.weight_spin.setValue(3.0)
     ed.add_point(3.14, 95.3)
-    assert [3.0, 95.0, 3.0] in ed.pts and [-3.0, 95.0, 3.0] in ed.pts and len(ed.sel) == 2
+    assert [3.0, 95.0, 3.0, None] in ed.pts and [-3.0, 95.0, 3.0, None] in ed.pts and len(ed.sel) == 2
     n = len(ed.pts)
     ed.undo(); assert len(ed.pts) == n - 2
     ed.redo(); assert len(ed.pts) == n
@@ -759,7 +759,7 @@ def test_grape_point_editor():
     ed.fill_rect(-1, 90, 1, 110, n_off=3, n_b1=2)
     assert {(p[0], p[1]) for p in ed.pts} >= {(-1.0, 90.0), (0.0, 110.0), (1.0, 110.0)}
     # table editing
-    r = ed.pts.index([-1.0, 90.0, 1.0])
+    r = ed.pts.index([-1.0, 90.0, 1.0, None])
     ed.table.item(r, 2).setText("7"); process(5)
     assert ed.pts[r][2] == 7.0
     # save / load round trip (JSON and CSV)
@@ -769,7 +769,8 @@ def test_grape_point_editor():
             ed.save(os.path.join(d, name)); ed.delete_selected(); ed.select_all(); ed.delete_selected()
             assert not ed.pts and not ed.apply_button.isEnabled()
             ed.load(os.path.join(d, name))
-            assert np.allclose(ed.points(), before), name
+            assert np.allclose([p[:3] for p in ed.points()], [p[:3] for p in before]), name
+            assert [p[3] for p in ed.points()] == [p[3] for p in before], name
     # background: infidelity of the current pulse for the gate goal
     offs, b1, z = ed.background_map(21, 5)
     assert z.shape == (5, 21) and np.all(np.isfinite(z)) and np.all(z <= 1e-9)
@@ -868,6 +869,113 @@ def test_fidelity_window():
     fw.close(); process(20)
     assert fw._proc is None and not proc.is_alive()
     w.close()
+
+
+def test_grape_per_point_goals():
+    """Selective pulses: own goals per point in the point editor (default: the GRAPE gate goal), shown in colours
+    and the table, used by the config, the optimization, the area score and the fidelity window."""
+    from psa.editor_gui.goal_dialog import PRESETS, GoalDialog
+    ex = {"gate": "PP", "m0": [0, 0, 1], "mt": [1, 0, 0]}
+    keep = {"gate": "PP", "m0": [0, 0, 1], "mt": [0, 0, 1]}
+    # the goal dialog: presets, default, validation
+    dlg = GoalDialog(None, 3)
+    assert dlg.goal() is None and dlg.default_radio.isChecked()
+    dlg._preset([p[0] for p in PRESETS].index("excite z → x (PP)"))
+    assert dlg.goal() == {"gate": "PP", "m0": [0.0, 0.0, 1.0], "mt": [1.0, 0.0, 0.0]}
+    dlg.ur_radio.setChecked(True); dlg.angle_spin.setValue(30.0)
+    assert dlg.goal()["angle"] == 30.0
+    for sp in dlg.axis_spins:
+        sp.setValue(0.0)
+    dlg._ok()
+    assert dlg.result() != 1 and "non-zero" in dlg.error.text()
+    dlg.close()
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    tab.source_box.setCurrentText("rectangular"); tab.dur_spin.setValue(300.0); tab.amp_spin.setValue(30.0)
+    tab.load_button.click(); process(20)
+    tab.order_checks[1].setChecked(False); tab.gate_box.setCurrentIndex(2)          # PP z -> x default
+    tab.offsets_edit.setText("-1:1:3, -7:-5:3, 5:7:3"); tab.b1_edit.setText("100")
+    tab.visual_button.click(); process(50)
+    ed = tab.point_editor
+    assert all(p[3] is None for p in ed.pts) and "default: PP z→x" in ed.legend.text()
+    tab.mt_spins[0].setValue(0.0); tab.mt_spins[1].setValue(1.0)                    # legend follows the gate goal
+    assert "default: PP z→y" in ed.legend.text()
+    tab.mt_spins[1].setValue(0.0); tab.mt_spins[0].setValue(1.0)
+    ed.select_in_rect(4, 90, 8, 110); ed.select_in_rect(-8, 90, -4, 110, extend=True)
+    assert len(ed.sel) == 6
+    ed.set_goal_selected(keep)
+    assert sum(p[3] == keep for p in ed.pts) == 6 and "PP z→z" in ed.legend.text() and "default" in ed.legend.text()
+    assert {ed.table.item(r, 3).text() for r in range(len(ed.pts))} == {"default", "PP z→z"}
+    assert "6 with own goal" in ed.info.text()
+    ed.undo(); assert all(p[3] is None for p in ed.pts)
+    ed.redo(); assert sum(p[3] is not None for p in ed.pts) == 6
+    offs, b1, z = ed.background_map(31, 3)                 # nearest point's goal
+    assert np.all(np.isfinite(z))
+    ed.apply_button.click(); process(10)
+    assert tab.custom_points is not None and "6 with own goal" in tab.points_info.text()
+    cfg = tab.config()
+    assert cfg.mode == "broadband" and sum(g is not None for g in cfg.point_goals()) == 6
+    by_offset = dict(zip([o for o, _ in cfg.ensemble()], cfg.point_targets()))
+    assert by_offset[0.0]["mt"] == [1.0, 0.0, 0.0] and by_offset[7e3] == keep and by_offset[-5e3] == keep
+    # gate "none" works too when every point has its own goal
+    ed.select_all(); ed.set_goal_selected(ex); ed.select_in_rect(4, 90, 8, 110); ed.set_goal_selected(keep)
+    ed.apply_button.click(); process(10)
+    tab.gate_box.setCurrentIndex(0)
+    assert tab.config().gate == "none"
+    tab.gate_box.setCurrentIndex(2)
+    # a short selective optimization through the tab; area score and fidelity window use the goals per point
+    w.solver_settings.max_nfev = 150
+    tab.solve_button.click()
+    wait_until(lambda: not tab.solving, 180)
+    assert tab.last_area is not None and "area -7 … 7 kHz" in tab.status.text(), tab.status.text()
+    wait_panel(w)
+    w.panel.fid_expand.click(); process(50)
+    fw = w.panel.fidelity_window
+    ref, label = fw.reference()
+    assert ref["kind"] == "points" and "goals per point (9 points, 9 with own goal" in label
+    fw.map_off[2].setValue(15); fw.map_amp[2].setValue(3); fw.cut_off_range[2].setValue(31); fw.cut_amp_range[2].setValue(5)
+    fw.refresh_button.click(); wait_until(lambda: not fw.busy, 120)
+    assert fw.result is not None and fw.result["map"].shape == (3, 15) and np.all(np.isfinite(fw.result["map"]))
+    ed.close(); fw.close(); w.close()
+
+
+def test_grape_freedom():
+    """Goals up to a free phase / linear phase: settings in the gate group (hidden in quick mode), the fitted
+    values in the status, the fidelity window judges with the same fitted rotation."""
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    assert tab.freedom == "none" and not tab.delay_spin.isVisibleTo(tab)
+    tab.freedom_box.setCurrentIndex(2)
+    assert tab.freedom == "linear" and tab.delay_spin.isVisibleTo(tab)
+    tab.quick_radio.setChecked(True)
+    assert not tab.freedom_widget.isVisibleTo(tab) and tab.quick_setup()[1].freedom == "none"
+    tab.expert_radio.setChecked(True)
+    assert tab.freedom_widget.isVisibleTo(tab)
+    tab.source_box.setCurrentText("rectangular"); tab.dur_spin.setValue(150.0); tab.load_button.click(); process(20)
+    tab.order_checks[1].setChecked(False); tab.gate_box.setCurrentIndex(2)          # PP z -> x
+    tab.offsets_edit.setText("-8:8:17"); tab.b1_edit.setText("100")
+    cfg = tab.config()
+    assert cfg.freedom == "linear" and cfg.max_delay_us == 0.0 and cfg.mode == "broadband"
+    w.solver_settings.max_nfev = 150
+    tab.solve_button.click(); assert not tab.freedom_box.isEnabled()
+    wait_until(lambda: not tab.solving, 180)
+    text = tab.status.text()
+    assert "free phase [°]" in text and "free delay [µs]" in text and tab.freedom_box.isEnabled(), text
+    wait_panel(w)
+    w.panel.fid_expand.click(); process(50)
+    fw = w.panel.fidelity_window
+    ref, label = fw.reference()
+    assert ref["kind"] == "points" and ref["freedom"] == "linear" and "up to a linear phase" in label
+    fw.map_check.setChecked(False); fw.cut_amp_check.setChecked(False)
+    fw.cut_off_range[0].setValue(-8.0); fw.cut_off_range[1].setValue(8.0); fw.cut_off_range[2].setValue(17)
+    fw.refresh_button.click(); wait_until(lambda: not fw.busy, 120)
+    from psa.design.grape import GrapeProblem
+    prob = GrapeProblem(tab.result, tab._cfg)
+    summ = prob.goals(prob.x0)[2]
+    assert abs(np.max(fw.result["cut_offset"]) - summ["max infidelity"]) < 1e-9 * max(1.0, summ["max infidelity"])
+    fw.close(); w.close()
 
 
 def test_grape_tab_quick_mode():

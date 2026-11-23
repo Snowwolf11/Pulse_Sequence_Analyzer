@@ -195,6 +195,12 @@ like classical GRAPE. The duration and the number of sub-pulses stay those of th
     custom selection ("Back to grid" returns to the fields).
   • Goals at every point: the gate goal (order 0; with only that, classical broadband GRAPE) plus the
     ticked offset orders A1/A2/A3 (SCQC) and first-order B1, expanded around every point.
+  • Own goals per point (point editor: select points, "Goal for selected…" or double-click the goal in the
+    table): a UR rotation or a PP transfer instead of the gate goal of the tab, with presets ("do nothing",
+    "excite z → x", "invert z → −z", …). For selective pulses: e.g. excite inside a band, do nothing
+    outside. The markers are coloured by goal (white: default). Between the points (area score, background,
+    fidelity window) every location is judged by the goal of its nearest point. With own goals for all
+    points the gate goal of the tab may be "none".
   • Weights: a point's goal terms count with its weight. All goal terms are divided by √(sum of the
     weights), so the optimizer minimizes a weighted mean over the points: adding points does not shift
     the balance against smoothness, stay close and the rate limits. Lawson starts from the weights.
@@ -206,6 +212,12 @@ like classical GRAPE. The duration and the number of sub-pulses stay those of th
     the status shows the worst value and where it is, the mean and the fraction below 1e-4.
 - Gate goal: none, UR (rotation angle about an axis; the whole rotation) or PP (point to point: initial
   magnetization m0 to a target). For PP the robustness terms only count the error that moves m0.
+- Freedom (expert mode): the gate goals only have to hold up to a z-rotation after the pulse, fitted by
+  the optimizer for every pulse: "free phase" (one angle, absorbed by the phases of later pulses or the
+  receiver) or "linear phase" (an angle plus offset × delay, i.e. a free delay after the pulse, correctable
+  by a first-order phase correction; |delay| at most "max |delay|", auto = the pulse duration). Often
+  allows shorter or better pulses (e.g. broadband excitation). The status shows the fitted phase and delay;
+  the area score and the fidelity window use the same fitted rotation.
 - The amplitude limit (100 %) is always kept exactly (built into the parametrization).
 - Even out points (Lawson reweighting, both modes; off by default): least squares minimizes the sum over
   the points (offsets in local mode, grid points in broadband mode), so the result can be very good at

@@ -303,6 +303,26 @@ class GrapeTab(QWidget):
         row, self.m0_spins = vector_row((0.0, 0.0, 1.0)); pf.addRow("from m0:", row)
         row, self.mt_spins = vector_row((1.0, 0.0, 0.0)); pf.addRow("to:", row)
         gl.addWidget(self.pp_widget)
+        self.gate_box.currentIndexChanged.connect(self._gate_goal_edited)
+        for sp in [self.angle_spin] + self.axis_spins + self.m0_spins + self.mt_spins:
+            sp.valueChanged.connect(self._gate_goal_edited)   # the point editor's legend names the gate goal
+        self.freedom_widget = QWidget(); fr = QHBoxLayout(self.freedom_widget); fr.setContentsMargins(0, 0, 0, 0)
+        self.freedom_box = QComboBox()
+        self.freedom_box.addItems(["none", "free phase (z-rotation after the pulse)",
+                                   "linear phase (phase + delay after the pulse)"])
+        self.freedom_box.setToolTip("let the gate goals hold only up to a z-rotation after the pulse, fitted by the "
+                                    "optimizer: a free phase (absorbed by the phases of later pulses / the receiver) or "
+                                    "a phase linear in the offset (= a free delay after the pulse; correctable by a "
+                                    "first-order phase correction). Often allows shorter pulses. The status shows the "
+                                    "fitted phase and delay")
+        self.delay_spin = QDoubleSpinBox(); self.delay_spin.setRange(0, 1e5); self.delay_spin.setDecimals(1)
+        self.delay_spin.setSuffix(" µs"); self.delay_spin.setSpecialValueText("auto")
+        self.delay_spin.setToolTip("largest |delay| of the linear phase; auto = the pulse duration")
+        self.delay_label = QLabel("max |delay|:")
+        fr.addWidget(QLabel("freedom:")); fr.addWidget(self.freedom_box, 1)
+        fr.addWidget(self.delay_label); fr.addWidget(self.delay_spin)
+        self.freedom_box.currentIndexChanged.connect(self._freedom_changed)
+        gl.addWidget(self.freedom_widget)
         ll.addWidget(gbox)
 
         # ---- controls and smoothness
@@ -432,6 +452,7 @@ class GrapeTab(QWidget):
         self._mode_changed(); self._gate_changed(); self._source_changed(self.source_box.currentText())
         self.apply_preset("exploit")
         self._quick = None
+        self._freedom_changed()
         self.quick_radio.toggled.connect(self._run_mode_changed)
         self._run_mode_changed()
         lock_heights(self)
@@ -448,6 +469,7 @@ class GrapeTab(QWidget):
         for box in self.expert_boxes:
             box.setVisible(not quick)
         self.settings_button.setVisible(not quick)
+        self.freedom_widget.setVisible(not quick)          # the quick recipe has no freedom (yet)
         self.gate_box.model().item(0).setEnabled(not quick)          # quick mode needs a gate goal
         if quick and self.gate_box.currentIndex() == 0:
             self.gate_box.setCurrentIndex(1)
@@ -494,7 +516,8 @@ class GrapeTab(QWidget):
                 finally:
                     self._setting_fields = False
                 points = None
-        self.custom_points = None if points is None else [list(map(float, p)) for p in points]
+        self.custom_points = None if points is None else [
+            [float(v) for v in p[:3]] + [p[3] if len(p) > 3 else None] for p in points]
         self._points_changed()
 
     def open_point_editor(self):
@@ -504,7 +527,8 @@ class GrapeTab(QWidget):
             pts = []
         if self.point_editor is None:
             from psa.editor_gui.point_editor import PointEditor
-            self.point_editor = PointEditor(pts, self._point_grid, self._background_source, self)
+            self.point_editor = PointEditor(pts, self._point_grid, self._background_source, self,
+                                            default_goal_provider=self.gate_goal)
             self.point_editor.applied.connect(self.set_points)
         else:
             self.point_editor.set_points(pts)
@@ -526,23 +550,48 @@ class GrapeTab(QWidget):
             gate = ("none", "UR", "PP")[self.gate_box.currentIndex()]
             axis, angle = [s.value() for s in self.axis_spins], self.angle_spin.value()
             m0, mt = [s.value() for s in self.m0_spins], [s.value() for s in self.mt_spins]
+        freedom, max_delay = ((cfg.freedom, cfg.max_delay_us) if cfg is not None
+                              else (self.freedom if not self.quick_mode else "none", self.delay_spin.value()))
+        if cfg is not None:
+            points = cfg.points or [[o, s_] for o, s_ in cfg.ensemble()]
+        else:
+            try:
+                points = self.selected_points()
+            except ValueError:
+                points = self.custom_points or []
+        if freedom != "none" or any(len(p) > 3 and p[3] is not None for p in points):   # goals at the points
+            return {"kind": "points", "points": [list(p) for p in points], "gate": gate,
+                    "axis": list(map(float, axis)), "angle": float(angle), "m0": list(map(float, m0)),
+                    "mt": list(map(float, mt)), "freedom": freedom, "max_delay_us": float(max_delay)}
         if gate == "UR" and any(abs(v) > 0 for v in axis):
             return {"kind": "UR", "axis": list(map(float, axis)), "angle": float(angle)}
         if gate == "PP" and any(abs(v) > 0 for v in m0) and any(abs(v) > 0 for v in mt):
             return {"kind": "PP", "m0": list(map(float, m0)), "mt": list(map(float, mt))}
         return None
 
+    def gate_goal(self):
+        """The gate goal of the fields as a point goal ({"gate": "UR", "axis", "angle"} / {"gate": "PP", "m0", "mt"}),
+        or None for "none" or a zero vector."""
+        i = self.gate_box.currentIndex()
+        if i == 1 and any(s.value() for s in self.axis_spins):
+            return {"gate": "UR", "axis": [s.value() for s in self.axis_spins], "angle": self.angle_spin.value()}
+        if i == 2 and any(s.value() for s in self.m0_spins) and any(s.value() for s in self.mt_spins):
+            return {"gate": "PP", "m0": [s.value() for s in self.m0_spins], "mt": [s.value() for s in self.mt_spins]}
+        return None
+
+    def _gate_goal_edited(self, *args):
+        if getattr(self, "point_editor", None) is not None:
+            self.point_editor.update_legend()
+
     def _background_source(self):
         """(current pulse, GrapeConfig with the gate goal) for the point editor's infidelity map, or None."""
-        i = self.gate_box.currentIndex()
         ps = self.current_pulse()
-        if i == 0 or ps is None:
+        if ps is None:
             return None
-        cfg = GrapeConfig(mode="broadband", gate=("UR", "PP")[i - 1], target_axis=[s.value() for s in self.axis_spins],
-                          target_angle_deg=self.angle_spin.value(), m0=[s.value() for s in self.m0_spins],
-                          m_target=[s.value() for s in self.mt_spins])
-        cfg.check()
-        return ps, cfg
+        cfg = GrapeConfig(mode="broadband", gate=("none", "UR", "PP")[self.gate_box.currentIndex()],
+                          target_axis=[s.value() for s in self.axis_spins], target_angle_deg=self.angle_spin.value(),
+                          m0=[s.value() for s in self.m0_spins], m_target=[s.value() for s in self.mt_spins])
+        return ps, cfg                       # the editor adds its points (with their own goals)
 
     def _points_changed(self, *args):
         if getattr(self, "_setting_fields", False):
@@ -556,7 +605,9 @@ class GrapeTab(QWidget):
             pts = self.custom_points
             ws = [p[2] for p in pts]
             wtxt = "weights 1" if min(ws) == max(ws) else f"weights {min(ws):g} … {max(ws):g}"
-            self.points_info.setText(f"custom selection: {len(pts)} points, {wtxt}")
+            n_own = sum(len(p) > 3 and p[3] is not None for p in pts)
+            gtxt = f", {n_own} with own goal" if n_own else ""
+            self.points_info.setText(f"custom selection: {len(pts)} points, {wtxt}{gtxt}")
             self.points_info.setStyleSheet(f"color: {MUTED_FG};")
             return
         try:
@@ -577,6 +628,14 @@ class GrapeTab(QWidget):
         i = self.gate_box.currentIndex()
         self.ur_widget.setVisible(i == 1)
         self.pp_widget.setVisible(i == 2)
+
+    def _freedom_changed(self, *args):
+        lin = self.freedom_box.currentIndex() == 2
+        self.delay_label.setVisible(lin); self.delay_spin.setVisible(lin)
+
+    @property
+    def freedom(self):
+        return ("none", "phase", "linear")[self.freedom_box.currentIndex()]
 
     def _source_changed(self, text):
         gen = text in ("rectangular", "random")
@@ -635,8 +694,9 @@ class GrapeTab(QWidget):
         points = self.selected_points()
         orders = [k for k, c in self.order_checks.items() if c.isChecked()]
         gate = ("none", "UR", "PP")[self.gate_box.currentIndex()]
-        if gate == "none" and not orders and not self.b1_check.isChecked():
-            raise ValueError("choose a goal: a gate goal, an offset order or B1")
+        own_goals = [len(p) > 3 and p[3] is not None for p in points]
+        if gate == "none" and not orders and not self.b1_check.isChecked() and not all(own_goals):
+            raise ValueError("choose a goal: a gate goal (or own goals for all points), an offset order or B1")
         try:
             weight = float(self.reg_weight.text().replace(",", "."))
         except ValueError:
@@ -661,6 +721,7 @@ class GrapeTab(QWidget):
             max_phase_rate_khz=self.phase_rate_spin.value(), n_starts=self.starts_spin.value(),
             multistart_noise=self.spread_spin.value(), reweight_rounds=self.reweight_spin.value(),
             reweight_power=self.reweight_power_spin.value(), limits_late=self.limits_late_check.isChecked(),
+            freedom=self.freedom, max_delay_us=self.delay_spin.value(),
             **self._exploration_fields())
         if cfg.controls == "spline" and self.start_pulse is not None and cfg.n_spline > self.start_pulse.N:
             raise ValueError(f"more spline control points ({cfg.n_spline}) than sub-pulses ({self.start_pulse.N})")
@@ -758,7 +819,7 @@ class GrapeTab(QWidget):
                  self.reg_box, self.reg_weight, self.noise_spin, self.full_radio, self.spline_radio, self.spline_spin,
                  self.smooth_edit, self.amp_rate_spin, self.phase_rate_spin, self.starts_spin, self.spread_spin,
                  self.preset_box, self.reweight_spin, self.reweight_power_spin, self.limits_late_check, self.area_check,
-                 self.quick_radio, self.expert_radio] + self.gen_widgets + self.explore_dialog.widgets + self.quick_widgets)
+                 self.quick_radio, self.expert_radio, self.freedom_box, self.delay_spin] + self.gen_widgets + self.explore_dialog.widgets + self.quick_widgets)
 
     def _set_inputs_enabled(self, on):
         for w in self._inputs():

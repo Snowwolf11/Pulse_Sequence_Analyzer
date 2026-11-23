@@ -8,7 +8,8 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
-from psa.design.points import format_values, grid_points, is_grid, load_points, parse_values, save_points, snap
+from psa.design.points import (describe_goal, format_values, goal_from_text, goal_to_text, grid_points, is_grid,
+                               load_points, parse_values, save_points, snap)
 
 
 def test_parse_values():
@@ -48,18 +49,21 @@ def test_snap():
 
 
 def test_save_and_load_json_and_csv():
-    pts = [[-2500.0, 0.95, 1.0], [0.0, 1.0, 3.5], [4100.0, 1.1, 0.25]]
+    ex = {"gate": "PP", "m0": [0.0, 0.0, 1.0], "mt": [1.0, 0.0, 0.0]}
+    ur = {"gate": "UR", "axis": [0.0, 0.6, 0.8], "angle": 33.5}
+    pts = [[-2500.0, 0.95, 1.0, None], [0.0, 1.0, 3.5, ex], [4100.0, 1.1, 0.25, ur]]
     with tempfile.TemporaryDirectory() as d:
         for name in ("sel.json", "sel.csv"):
             path = os.path.join(d, name)
             save_points(path, pts, {"offset_khz": 0.2, "b1_percent": 1.0})
             back, grid = load_points(path)
-            assert np.allclose(back, pts), name
+            assert np.allclose([p[:3] for p in back], [p[:3] for p in pts]), name
+            assert [p[3] for p in back] == [None, ex, ur], name
             assert (grid == {"offset_khz": 0.2, "b1_percent": 1.0}) if name.endswith("json") else grid is None
         with open(os.path.join(d, "plain.csv"), "w") as f:                    # no header, no weights
             f.write("1.5, 100\n-1.5, 98\n")
         back, _ = load_points(os.path.join(d, "plain.csv"))
-        assert np.allclose(back, [[1500, 1.0, 1.0], [-1500, 0.98, 1.0]])
+        assert np.allclose([p[:3] for p in back], [[1500, 1.0, 1.0], [-1500, 0.98, 1.0]]) and back[0][3] is None
         with open(os.path.join(d, "bad.json"), "w") as f:
             f.write('{"points": [[0, 100, 1]]}')
         try:
@@ -68,6 +72,24 @@ def test_save_and_load_json_and_csv():
             pass
         else:
             raise AssertionError("loaded a file without the format tag")
+
+
+def test_goal_text():
+    ex = {"gate": "PP", "m0": [0.0, 0.0, 1.0], "mt": [1.0, 0.0, 0.0]}
+    nothing = {"gate": "UR", "axis": [0.0, 0.0, 1.0], "angle": 0.0}
+    assert describe_goal(None) == "default" and describe_goal(ex) == "PP z→x"
+    assert describe_goal(nothing) == "UR 0° (nothing)"
+    assert describe_goal({"gate": "UR", "axis": [0, -1, 0], "angle": 90}) == "UR 90° −y"
+    assert describe_goal({"gate": "PP", "m0": [0, 0, 1], "mt": [1, 1, 0]}) == "PP z→(1, 1, 0)"
+    for g in (None, ex, nothing, {"gate": "UR", "axis": [0.1, 0.2, 0.3], "angle": -45.25}):
+        assert goal_from_text(goal_to_text(g)) == g
+    for bad in ("XY:1:2", "UR:1", "UR:90:0,0,0", "PP:0,0,1:1,0"):
+        try:
+            goal_from_text(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad}")
+    assert is_grid([[0.0, 1.0, 1.0, ex]]) is None and is_grid([[0.0, 1.0, 1.0, None]]) == ([0.0], [100.0])
 
 
 if __name__ == "__main__":

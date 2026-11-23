@@ -42,6 +42,12 @@ def describe(ref):
         return f"UR {float(ref['angle']):g}° about {_fmt(ref['axis'])}"
     if ref.get("kind") == "PP":
         return f"PP {_fmt(ref['m0'])} → {_fmt(ref['mt'])}"
+    if ref.get("kind") == "points":
+        n_own = sum(len(p) > 3 and p[3] is not None for p in ref["points"])
+        free = {"phase": "; up to a free phase", "linear": "; up to a linear phase (phase + delay)"}.get(
+            ref.get("freedom", "none"), "")
+        return (f"goals per point ({len(ref['points'])} points, {n_own} with own goal; between the points: the goal "
+                f"of the nearest point{free})")
     return "the pulse's own gate (0 kHz, 100 %)"
 
 
@@ -148,7 +154,7 @@ class FidelityWindow(QDialog):
         row, self.cut_off_range = _range_row(-15.0, 15.0, 601, " kHz", (-1e4, 1e4)); of.addRow("offset:", row)
         ol.addLayout(of)
         self.cut_off_plot = make_plot("log10(1 − F)", "offset [kHz]"); self.cut_off_plot.setMinimumHeight(260)
-        self.cut_off_curve = self.cut_off_plot.plot(pen=pg.mkPen(ACCENT, width=2))
+        self.cut_off_curve = self.cut_off_plot.plot(pen=pg.mkPen(ACCENT, width=2), connect="finite")
         ol.addWidget(self.cut_off_plot)
         self.cut_off_info = QLabel(""); ol.addWidget(self.cut_off_info)
         cl.addWidget(obox)
@@ -161,7 +167,7 @@ class FidelityWindow(QDialog):
         row, self.cut_amp_range = _range_row(50.0, 150.0, 201, " %", (0.0, 1e4)); af.addRow("amplitude:", row)
         al.addLayout(af)
         self.cut_amp_plot = make_plot("log10(1 − F)", "amplitude [%]"); self.cut_amp_plot.setMinimumHeight(260)
-        self.cut_amp_curve = self.cut_amp_plot.plot(pen=pg.mkPen(ACCENT, width=2))
+        self.cut_amp_curve = self.cut_amp_plot.plot(pen=pg.mkPen(ACCENT, width=2), connect="finite")
         al.addWidget(self.cut_amp_plot)
         self.cut_amp_info = QLabel(""); al.addWidget(self.cut_amp_info)
         cl.addWidget(abox)
@@ -183,7 +189,7 @@ class FidelityWindow(QDialog):
         i = self.ref_box.currentIndex()
         if i in (UR, PP) and not getattr(self, "_ref_edited", False):
             goal = self.goal_provider()[0] if self.goal_provider else None
-            if goal is not None:                      # start from the GRAPE gate goal
+            if goal is not None and goal.get("kind") != "points":                      # start from the GRAPE gate goal
                 self.set_reference_inputs(goal)
         self.ur_widget.setVisible(i == UR)
         self.pp_widget.setVisible(i == PP)
@@ -249,7 +255,7 @@ class FidelityWindow(QDialog):
         """The job for a pulse from the inputs (ValueError if invalid)."""
         ref, label = self.reference()
         for key in ("axis", "m0", "mt"):
-            if key in ref and not any(abs(v) > 0 for v in ref[key]):
+            if ref["kind"] != "points" and key in ref and not any(abs(v) > 0 for v in ref[key]):
                 raise ValueError("the reference vectors must not be zero")
         job = {"pulse": [ps.amplitude.tolist(), ps.phase.tolist(), ps.dt, ps.umax], "reference": ref,
                "reference_label": label,

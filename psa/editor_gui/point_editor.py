@@ -21,12 +21,15 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QFormLayout, QGraphicsRectItem, QHBoxLayout, QHeaderView, QLabel, QPushButton,
                                QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from psa.design.points import DEFAULT_GRID, load_points, save_points, snap
+from psa.design.grape import goal_key
+from psa.design.points import DEFAULT_GRID, describe_goal, load_points, save_points, snap
 from psa.editor_gui.widgets import ACCENT, BAD, MUTED_FG, lock_heights
 
 PICK_PX = 9                       # pick radius around a point [pixels]
 WHEEL_FACTOR = 1.25
 BG_LEVELS = (-8.0, 0.0)
+DEFAULT_COLOR = "#f5f5f4"                                   # points with the default goal
+GOAL_COLORS = ("#f59e0b", "#a78bfa", "#34d399", "#f472b6", "#60a5fa", "#fb7185", "#a3e635", "#22d3ee")
 
 
 def marker_size(w):
@@ -75,8 +78,10 @@ class PointEditor(QDialog):
     """Edits a point selection; ``applied`` carries [[offset_hz, scale, weight], ...]."""
     applied = Signal(object)
 
-    def __init__(self, points=None, grid_provider=None, background_provider=None, parent=None):
+    def __init__(self, points=None, grid_provider=None, background_provider=None, parent=None,
+                 default_goal_provider=None):
         super().__init__(parent)
+        self.default_goal_provider = default_goal_provider  # callable() -> the GRAPE tab's gate goal (dict) or None
         self.setWindowTitle("GRAPE points: offset × B1")
         self.resize(1100, 640)
         self.grid_provider = grid_provider or (lambda: dict(DEFAULT_GRID))
@@ -123,6 +128,16 @@ class PointEditor(QDialog):
         set_w = QPushButton("Set for selected"); set_w.clicked.connect(lambda: self.set_weight_selected(self.weight_spin.value()))
         wrow = QHBoxLayout(); wrow.addWidget(self.weight_spin); wrow.addWidget(set_w)
         f.addRow("weight:", wrow)
+        grow = QHBoxLayout()
+        self.goal_button = QPushButton("Goal for selected…")
+        self.goal_button.setToolTip("own goal (UR rotation or PP transfer) for the selected points, e.g. for selective "
+                                    "pulses; default: the gate goal of the GRAPE tab. Double-click a goal in the table "
+                                    "does the same")
+        self.goal_button.clicked.connect(self.edit_goal_selected)
+        grow.addWidget(self.goal_button); grow.addStretch()
+        f.addRow("goal:", grow)
+        self.legend = QLabel(""); self.legend.setWordWrap(True); self.legend.setTextFormat(Qt.TextFormat.RichText)
+        f.addRow(self.legend)
         self.drag_box = QComboBox(); self.drag_box.addItems(["select (rectangle)", "fill rectangle with a grid"])
         f.addRow("drag on empty space:", self.drag_box)
         frow = QHBoxLayout()
@@ -138,15 +153,17 @@ class PointEditor(QDialog):
         lrow = QHBoxLayout(); lrow.addWidget(self.lock_check); lrow.addWidget(self.lock_info); lrow.addStretch()
         f.addRow(lrow)
         self.bg_check = QCheckBox("background: log10(1 − F) of the current pulse")
-        self.bg_check.setToolTip("log10(1 − F) of the tab's current pulse (result, else start) for the gate goal, over "
-                                 "the visible area; 'Update' recomputes it for the current view (jet: −8 blue … 0 red)")
+        self.bg_check.setToolTip("log10(1 − F) of the tab's current pulse (result, else start) over the visible area; "
+                                 "every location is judged by the goal of its nearest point; 'Update' recomputes it for "
+                                 "the current view (jet: −8 blue … 0 red)")
         self.bg_check.toggled.connect(self._bg_toggled)
         bg_upd = QPushButton("Update"); bg_upd.clicked.connect(self.update_background)
         brow = QHBoxLayout(); brow.addWidget(self.bg_check); brow.addWidget(bg_upd); brow.addStretch()
         f.addRow(brow)
         sl.addLayout(f)
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["offset [kHz]", "B1 [%]", "weight"])
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["offset [kHz]", "B1 [%]", "weight", "goal"])
+        self.table.cellDoubleClicked.connect(lambda r, c: c == 3 and self.edit_goal_selected())
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.cellChanged.connect(self._cell_changed)
@@ -183,14 +200,15 @@ class PointEditor(QDialog):
     # ------------------------------------------------------------ model ---
     def set_points(self, points):
         """Load a selection given as [[offset_hz, scale, weight], ...] (clears undo)."""
-        self.pts = [[p[0] / 1e3, p[1] * 100.0, p[2] if len(p) > 2 else 1.0] for p in points]
+        self.pts = [[p[0] / 1e3, p[1] * 100.0, p[2] if len(p) > 2 else 1.0, p[3] if len(p) > 3 else None]
+                    for p in points]
         self.sel = set()
         self._undo, self._redo = [], []
         self._refresh()
 
     def points(self):
-        """The selection as [[offset_hz, scale, weight], ...] (sorted by offset, then B1)."""
-        return [[o * 1e3, b / 100.0, w] for o, b, w in sorted(self.pts, key=lambda p: (p[0], p[1]))]
+        """The selection as [[offset_hz, scale, weight, goal], ...] (sorted by offset, then B1)."""
+        return [[o * 1e3, b / 100.0, w, g] for o, b, w, g in sorted(self.pts, key=lambda p: (p[0], p[1]))]
 
     def grid(self):
         g = self.grid_provider() or {}
@@ -225,7 +243,7 @@ class PointEditor(QDialog):
         for i, p in enumerate(self.pts):
             if abs(p[0] - o) < 1e-9 and abs(p[1] - b) < 1e-9:
                 return i
-        self.pts.append([o, b, w])
+        self.pts.append([o, b, w, None])
         return len(self.pts) - 1
 
     def add_point(self, o, b, w=None, mirror=None):
@@ -302,6 +320,25 @@ class PointEditor(QDialog):
             self.sel = {i}
             self.delete_selected()
 
+    def set_goal_selected(self, goal):
+        """Own goal (dict) of the selected points; None = the default (the GRAPE tab's gate goal)."""
+        if self.sel:
+            self._push()
+            for i in self.sel:
+                self.pts[i][3] = None if goal is None else dict(goal)
+            self._refresh()
+
+    def edit_goal_selected(self):
+        if not self.sel:
+            self.info.setText("select points first (click, or drag a rectangle)")
+            self.info.setStyleSheet(f"color: {BAD};")
+            return
+        from psa.editor_gui.goal_dialog import GoalDialog
+        goals = {goal_key(self.pts[i][3]): self.pts[i][3] for i in self.sel}
+        ok, goal = GoalDialog.ask(self, next(iter(goals.values())) if len(goals) == 1 else None, len(self.sel))
+        if ok:
+            self.set_goal_selected(goal)
+
     def set_weight_selected(self, w):
         if self.sel and w > 0:
             self._push()
@@ -321,10 +358,10 @@ class PointEditor(QDialog):
         if on and self.pts:                   # snap the existing points; merge those that land on the same spot
             self._push()
             merged = {}
-            for i, (o, b, w) in enumerate(self.pts):
+            for o, b, w, goal in self.pts:
                 key = snap(o, b, g)
                 if key[1] > 0 and key not in merged:
-                    merged[key] = [key[0], key[1], w]
+                    merged[key] = [key[0], key[1], w, goal]
             self.pts = list(merged.values())
             self.sel = set()
             self._refresh()
@@ -353,7 +390,7 @@ class PointEditor(QDialog):
         if self._drag is None:
             return
         if self._drag["kind"] == "move":
-            for k, (o, b, _) in self._drag["orig"].items():
+            for k, (o, b, *_) in self._drag["orig"].items():
                 o2, b2 = self._snap(o + x - x0, b + y - y0)
                 if b2 > 0:
                     self.pts[k][0], self.pts[k][1] = o2, b2
@@ -375,36 +412,68 @@ class PointEditor(QDialog):
             p = self.view.mapSceneToView(pos)
             i = self.point_at(p.x(), p.y())
             if i is not None:
-                o, b, w = self.pts[i]
-                self.hover.setText(f"point: {o:g} kHz, {b:g} %, weight {w:g}")
+                o, b, w, goal = self.pts[i]
+                self.hover.setText(f"point: {o:g} kHz, {b:g} %, weight {w:g}, goal: {describe_goal(goal)}")
             else:
                 o, b = self._snap(p.x(), p.y())
                 self.hover.setText(f"{o:.3f} kHz, {b:.2f} %")
 
     # ------------------------------------------------------------- view ---
+    def goal_colors(self):
+        """{goal key: (color, goal)} of the goals in use, in order of appearance (default: white)."""
+        out, k = {}, 0
+        for p in self.pts:
+            key = goal_key(p[3])
+            if key not in out:
+                if p[3] is None:
+                    out[key] = (DEFAULT_COLOR, None)
+                else:
+                    out[key] = (GOAL_COLORS[k % len(GOAL_COLORS)], p[3]); k += 1
+        return out
+
     def _refresh(self, table=True):
+        colors = self.goal_colors()
         spots = []
-        for i, (o, b, w) in enumerate(self.pts):
+        for i, (o, b, w, goal) in enumerate(self.pts):
             s = i in self.sel
-            spots.append({"pos": (o, b), "size": marker_size(w),
-                          "brush": pg.mkBrush(ACCENT if s else "#f5f5f4"),
-                          "pen": pg.mkPen("#f59e0b" if s else "#1f2937", width=2 if s else 1)})
+            spots.append({"pos": (o, b), "size": marker_size(w), "brush": pg.mkBrush(colors[goal_key(goal)][0]),
+                          "pen": pg.mkPen(ACCENT if s else "#1f2937", width=3 if s else 1)})
         self.scatter.setData(spots)
+        self.update_legend(colors)
         if table:
             self._fill_table()
         n, ws = len(self.pts), [p[2] for p in self.pts]
         wtxt = "" if not n else (", weights 1" if min(ws) == max(ws) == 1 else f", weights {min(ws):g} … {max(ws):g}")
-        self.info.setText(f"{n} point{'s' * (n != 1)}{wtxt}, {len(self.sel)} selected")
+        n_own = sum(p[3] is not None for p in self.pts)
+        gtxt = f", {n_own} with own goal" if n_own else ""
+        self.info.setText(f"{n} point{'s' * (n != 1)}{wtxt}{gtxt}, {len(self.sel)} selected")
         self.info.setStyleSheet("" if n else f"color: {BAD};")
         self.apply_button.setEnabled(n > 0)
+
+    def default_goal_text(self):
+        """Legend text of the default goal: "default: <the GRAPE tab's current gate goal>"."""
+        if self.default_goal_provider is None:
+            return "default"
+        goal = self.default_goal_provider()
+        return "default: " + (describe_goal(goal) if goal is not None else "none (no gate goal)")
+
+    def update_legend(self, colors=None):
+        """Goal colours in use; the default entry names the current gate goal of the GRAPE tab."""
+        colors = self.goal_colors() if colors is None else colors
+        self.legend.setText("  ".join(f"<span style='color:{c}'>●</span> "
+                                      f"{self.default_goal_text() if g is None else describe_goal(g)}"
+                                      for c, g in colors.values()))
 
     def _fill_table(self):
         self._updating_table = True
         try:
             self.table.setRowCount(len(self.pts))
             for r, p in enumerate(self.pts):
-                for c, v in enumerate(p):
+                for c, v in enumerate(p[:3]):
                     self.table.setItem(r, c, QTableWidgetItem(f"{v:g}"))
+                item = QTableWidgetItem(describe_goal(p[3]))
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.table.setItem(r, 3, item)
             self.table.clearSelection()
             sm, model = self.table.selectionModel(), self.table.model()
             flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
@@ -414,7 +483,7 @@ class PointEditor(QDialog):
             self._updating_table = False
 
     def _cell_changed(self, r, c):
-        if self._updating_table or r >= len(self.pts):
+        if self._updating_table or r >= len(self.pts) or c > 2:
             return
         try:
             v = float(self.table.item(r, c).text().replace(",", "."))
@@ -450,16 +519,19 @@ class PointEditor(QDialog):
     def background_map(self, nx=161, ny=61):
         """(offsets_khz, b1_percent, log10 infidelity [ny, nx]) of the current pulse over the visible area,
         or None if there is no pulse / gate goal."""
-        from psa.design.grape import band_infidelity
+        from psa.design.grape import goal_infidelity_grid
         src = self.background_provider() if self.background_provider else None
-        if src is None:
+        if src is None or not self.pts:
             return None
         ps, cfg = src
+        cfg = cfg.replace(points=self.points())
+        if all(t is None for t in cfg.point_targets()):
+            return None
         r = self.view.viewRect()
         offs = np.linspace(r.left(), r.right(), nx)
         b1 = np.linspace(max(r.top(), 1e-3), max(r.bottom(), 2e-3), ny)
-        z = np.array([band_infidelity(ps, cfg, offs * 1e3, scale=b / 100.0) for b in b1])
-        return offs, b1, np.log10(np.maximum(z, 1e-16))
+        z = goal_infidelity_grid(ps, cfg, offs * 1e3, b1 / 100.0)      # nearest point's goal, NaN without goal
+        return offs, b1, np.log10(np.maximum(np.nan_to_num(z, nan=1.0), 1e-16))
 
     def update_background(self):
         try:
@@ -487,7 +559,7 @@ class PointEditor(QDialog):
     def load(self, path):
         pts, _ = load_points(path)
         self._push()
-        self.pts = [[p[0] / 1e3, p[1] * 100.0, p[2]] for p in pts]
+        self.pts = [[p[0] / 1e3, p[1] * 100.0, p[2], p[3]] for p in pts]
         self.sel = set()
         self._refresh()
         self.fit_view()

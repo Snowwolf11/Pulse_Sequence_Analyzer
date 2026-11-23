@@ -93,7 +93,10 @@ class GrapeConfig:
     coarse_levels: List[int] = field(default_factory=list)   # spline points of coarse stages before the controls
     reweight_rounds: int = 0                     # Lawson rounds: raise the weights of the worst points (0 = off)
     reweight_power: float = 0.5                  # weight update w <- w (e / mean e)^power (1: classic Lawson, may oscillate)
-    points: List[List[float]] = field(default_factory=list)  # explicit points [offset_hz, scale, weight] (empty: defaults)
+    points: List[list] = field(default_factory=list)  # explicit points [offset_hz, scale, weight, goal] (empty: defaults)
+    freedom: str = "none"                        # gate goals up to a z-rotation after the pulse: "none", "phase"
+                                                 # (one free angle) or "linear" (angle + offset x delay: linear phase)
+    max_delay_us: float = 0.0                    # "linear": |delay| at most this (0 = the pulse duration)
     start_kind: str = "perturb"                  # set by variant(): "perturb" or "random"
 
     def to_dict(self):
@@ -111,20 +114,29 @@ class GrapeConfig:
             raise ValueError("gate must be none, UR or PP")
         if self.points:
             for pt in self.points:
-                if not 1 <= len(pt) <= 3 or not all(np.isfinite(float(v)) for v in pt):
-                    raise ValueError("a point is [offset_hz, scale, weight] (scale and weight optional)")
+                nums = list(pt[:3])
+                if not 1 <= len(pt) <= 4 or not all(np.isfinite(float(v)) for v in nums):
+                    raise ValueError("a point is [offset_hz, scale, weight, goal] (scale, weight and goal optional)")
                 if len(pt) > 1 and float(pt[1]) <= 0:
                     raise ValueError("the amplitude scaling of a point must be positive")
                 if len(pt) > 2 and float(pt[2]) <= 0:
                     raise ValueError("the weight of a point must be positive")
+                if len(pt) > 3 and pt[3] is not None:
+                    check_goal(pt[3])
+        if self.freedom not in FREEDOMS:
+            raise ValueError(f"freedom must be one of {FREEDOMS}")
+        if self.max_delay_us < 0:
+            raise ValueError("the maximal delay must not be negative")
+        goals = self.point_goals()
+        every_point_has_gate = self.gate != "none" or (goals and all(g is not None for g in goals))
         if self.mode == "local":
             if not self.offsets_hz and not self.points:
                 raise ValueError("local robustness needs at least one offset")
-            if not self.orders and not self.b1 and self.gate == "none":
+            if not self.orders and not self.b1 and self.gate == "none" and not any(g is not None for g in goals):
                 raise ValueError("choose at least one goal (an order, B1 or a gate)")
         else:
-            if self.gate == "none":
-                raise ValueError("broadband optimization needs a UR or PP gate goal")
+            if not every_point_has_gate:
+                raise ValueError("broadband optimization needs a UR or PP gate goal (for every point)")
             if not self.points and (self.bb_offset_n < 1 or self.bb_scale_n < 1):
                 raise ValueError("the broadband grids need at least one point")
         if self.start_noise < 0 or self.multistart_noise < 0:
@@ -189,6 +201,21 @@ class GrapeConfig:
         scales = np.linspace(self.bb_scale_min, self.bb_scale_max, int(self.bb_scale_n))
         return [(float(o), float(s), 1.0) for o in offs for s in scales]
 
+    def point_goals(self):
+        """Own goal of every point (a goal dict, see check_goal) or None (= the gate goal of the config)."""
+        if self.points:
+            return [p[3] if len(p) > 3 else None for p in self.points]
+        return [None] * len(self.point_list())
+
+    def point_targets(self):
+        """Effective goal of every point: its own goal, else the config's gate goal (None if "none")."""
+        default = None
+        if self.gate == "UR":
+            default = {"gate": "UR", "axis": list(self.target_axis), "angle": float(self.target_angle_deg)}
+        elif self.gate == "PP":
+            default = {"gate": "PP", "m0": list(self.m0), "mt": list(self.m_target)}
+        return [g if g is not None else default for g in self.point_goals()]
+
     def ensemble(self):
         """(offset_hz, scale) of every point."""
         return [(o, s) for o, s, _ in self.point_list()]
@@ -197,6 +224,94 @@ class GrapeConfig:
         """Point weights normalized to mean 1, or None if all are equal."""
         w = np.array([p[2] for p in self.point_list()], float)
         return None if np.all(w == w[0]) else w / np.mean(w)
+
+
+FREEDOMS = ("none", "phase", "linear")
+
+
+def rz(theta):
+    """Rotations about z by the angles theta: (..., 3, 3)."""
+    c, s_ = np.cos(theta), np.sin(theta)
+    out = np.zeros(np.shape(theta) + (3, 3))
+    out[..., 0, 0], out[..., 0, 1], out[..., 1, 0], out[..., 1, 1], out[..., 2, 2] = c, -s_, s_, c, 1.0
+    return out
+
+
+def _overlaps(R, target):
+    """(a, b) with  overlap(theta) = a cos(theta) + b sin(theta) + const  for the target rotated by Rz(theta)
+    after the pulse (UR: tr((Rz Rt)^T R); PP: (R m0) . (Rz mt)). R: (..., 3, 3)."""
+    kind, Rt, m0, mt = target
+    if kind == "UR":
+        M = R @ Rt.T
+        return M[..., 0, 0] + M[..., 1, 1], M[..., 1, 0] - M[..., 0, 1]
+    m = R @ m0
+    return m[..., 0] * mt[0] + m[..., 1] * mt[1], m[..., 1] * mt[0] - m[..., 0] * mt[1]
+
+
+def fit_freedom(a, b, offsets_hz, weights, freedom, tau_max):
+    """Best free z-rotation after the pulse, theta_i = phi + 2 pi offset_i tau (tau = 0 for "phase"): maximizes
+    sum w_i (a_i cos theta_i + b_i sin theta_i), i.e. minimizes the weighted squared gate residual. phi in closed
+    form (atan2), tau by a grid search refined by golden section within |tau| <= tau_max. Returns (phi, tau)."""
+    a, b, f, w = (np.asarray(v, float) for v in (a, b, offsets_hz, weights))
+
+    def best_phi(tau):
+        d = 2 * math.pi * f * tau
+        A = np.sum(w * (a * np.cos(d) + b * np.sin(d)))
+        B = np.sum(w * (b * np.cos(d) - a * np.sin(d)))
+        return math.atan2(B, A), math.hypot(A, B)
+
+    if freedom != "linear" or tau_max <= 0 or np.ptp(f) == 0:
+        return best_phi(0.0)[0], 0.0
+    taus = np.linspace(-tau_max, tau_max, 401)
+    d = 2 * math.pi * np.outer(taus, f)
+    A = (np.cos(d) * a + np.sin(d) * b) @ w
+    B = (np.cos(d) * b - np.sin(d) * a) @ w
+    k = int(np.argmax(np.hypot(A, B)))
+    lo, hi = taus[max(k - 1, 0)], taus[min(k + 1, len(taus) - 1)]
+    g = (math.sqrt(5) - 1) / 2
+    x1, x2 = hi - g * (hi - lo), lo + g * (hi - lo)
+    f1, f2 = best_phi(x1)[1], best_phi(x2)[1]
+    for _ in range(40):
+        if f1 > f2:
+            hi, x2, f2 = x2, x1, f1
+            x1 = hi - g * (hi - lo); f1 = best_phi(x1)[1]
+        else:
+            lo, x1, f1 = x1, x2, f2
+            x2 = lo + g * (hi - lo); f2 = best_phi(x2)[1]
+    tau = 0.5 * (lo + hi)
+    return best_phi(tau)[0], tau
+
+
+def check_goal(goal):
+    """A per-point goal: {"gate": "UR", "axis": [x, y, z], "angle": degrees} or {"gate": "PP", "m0": [...],
+    "mt": [...]}. Raises ValueError if invalid."""
+    if not isinstance(goal, dict) or goal.get("gate") not in ("UR", "PP"):
+        raise ValueError("a point goal is {'gate': 'UR', 'axis', 'angle'} or {'gate': 'PP', 'm0', 'mt'}")
+    vecs = ("axis",) if goal["gate"] == "UR" else ("m0", "mt")
+    for k in vecs:
+        v = np.asarray(goal.get(k, ()), float)
+        if v.shape != (3,) or not np.all(np.isfinite(v)) or np.linalg.norm(v) == 0:
+            raise ValueError(f"point goal: '{k}' must be a non-zero 3-vector")
+    if goal["gate"] == "UR" and not np.isfinite(float(goal.get("angle", np.nan))):
+        raise ValueError("point goal: the UR angle must be a number")
+
+
+def goal_target(goal):
+    """("UR", Rt, None, None) or ("PP", None, m0, mt) of a goal dict; None for None."""
+    if goal is None:
+        return None
+    if goal["gate"] == "UR":
+        return ("UR", rotation_from_axis_angle(_unit(goal["axis"]), float(goal["angle"])), None, None)
+    return ("PP", None, _unit(goal["m0"]), _unit(goal["mt"]))
+
+
+def goal_key(goal):
+    """Hashable key of a goal (to group equal goals)."""
+    if goal is None:
+        return None
+    if goal["gate"] == "UR":
+        return ("UR", tuple(np.round(_unit(goal["axis"]), 12)), round(float(goal["angle"]), 9))
+    return ("PP", tuple(np.round(_unit(goal["m0"]), 12)), tuple(np.round(_unit(goal["mt"]), 12)))
 
 
 # ------------------------------------------------------------------ engine ---
@@ -339,7 +454,7 @@ def lawson_update(weights, errors, power=1.0):
 
 # ----------------------------------------------------------------- problem ---
 
-INFO_KEYS = ("mean infidelity", "gate error [°]", "max amplitude [%]", "max amplitude rate [%/µs]", "max phase rate [kHz]", "roughness",
+INFO_KEYS = ("mean infidelity", "gate error [°]", "free phase [°]", "free delay [µs]", "max amplitude [%]", "max amplitude rate [%/µs]", "max phase rate [kHz]", "roughness",
              "point error spread")
 SOFT_SCHEDULE = (1.0, 0.1, 0.01, 1e-3, 1e-4, 0.0)      # weights of the soft terms in successive stages
 LIMIT_EXCESS_TOL = 1e-3
@@ -362,6 +477,8 @@ class GrapeProblem:
         self.T = ps.duration
         self.m0, self.mt = _unit(config.m0), _unit(config.m_target)
         self.Rt = rotation_from_axis_angle(config.target_axis, config.target_angle_deg) if config.gate == "UR" else None
+        self.targets = [goal_target(g) for g in config.point_targets()]      # per point (None: no gate goal)
+        self.freedom_fit = (0.0, 0.0)        # fitted free z-rotation after the pulse (phi [rad], tau [s])
         self.soft_scale = 1.0
         self.limit_scale = 1.0               # 0 switches the rate limits off (stages before "limits")
         self.point_weights = None            # Lawson weights of the points (offsets / grid points), None = all 1
@@ -430,11 +547,12 @@ class GrapeProblem:
         return np.r_[f * ux, f * uy]
 
     # ------------------------------------------------------------- goals ---
-    def _gate_rows(self, R, dR, weight):
-        if self.cfg.gate == "UR":
-            return weight * (R - self.Rt).ravel() / 2, weight * dR.reshape(len(dR), 9).T / 2
-        m = R @ self.m0
-        return weight * (m - self.mt) / 2, weight * (dR @ self.m0).T / 2
+    def _gate_rows(self, R, dR, weight, target=None):
+        kind, Rt, m0, mt = target if target is not None else (self.cfg.gate, self.Rt, self.m0, self.mt)
+        if kind == "UR":
+            return weight * (R - Rt).ravel() / 2, weight * dR.reshape(len(dR), 9).T / 2
+        m = R @ m0
+        return weight * (m - mt) / 2, weight * (dR @ m0).T / 2
 
     def goals(self, x, with_jac=True):
         """Goal residuals (dense) and Jacobian (rows x 2N), plus a summary dict.
@@ -455,15 +573,40 @@ class GrapeProblem:
         K = max(orders) if orders else 0             # Taylor jets only if an order is wanted
         norm = 1.0 / math.sqrt(len(pts))
         inf, gerr = [], []
-        for off, sc in pts:
+        props = [propagator_and_gradient(ux, uy, self.dt, self.umax, off, sc, K) for off, sc in pts]
+        rots = [rotation_with_gradient(X[0], dX[:, 0]) if tgt is not None else None
+                for (X, dX), tgt in zip(props, self.targets)]
+        targets = list(self.targets)
+        if cfg.freedom != "none" and any(t is not None for t in targets):
+            # free z-rotation after the pulse, fitted for the current pulse (variable projection: the Jacobian
+            # is taken at the fitted rotation)
+            gi = [i for i, t in enumerate(targets) if t is not None]
+            ab = [_overlaps(rots[i][0], targets[i]) for i in gi]
+            w = np.ones(len(pts))
+            if self.user_w is not None:
+                w = w * self.user_w
+            if self.point_weights is not None and len(self.point_weights) == len(pts):
+                w = w * np.asarray(self.point_weights, float)
+            tau_max = (cfg.max_delay_us * 1e-6) if cfg.max_delay_us > 0 else self.T
+            phi, tau = fit_freedom([v[0] for v in ab], [v[1] for v in ab], [pts[i][0] for i in gi], w[gi],
+                                   cfg.freedom, tau_max)
+            self.freedom_fit = (phi, tau)
+            for i in gi:
+                kind, Rt, m0, mt = targets[i]
+                Z = rz(phi + 2 * math.pi * pts[i][0] * tau)
+                targets[i] = (kind, Z @ Rt, m0, None) if kind == "UR" else (kind, None, m0, Z @ mt)
+            summ["free phase [°]"] = float((math.degrees(phi) + 180) % 360 - 180)
+            if cfg.freedom == "linear":
+                summ["free delay [µs]"] = float(tau * 1e6)
+        for (off, sc), tgt, (X, dX), rot in zip(pts, targets, props, rots):
             marks.append(len(rows))
-            X, dX = propagator_and_gradient(ux, uy, self.dt, self.umax, off, sc, K)
+            pp_m0 = tgt[2] if tgt is not None and tgt[0] == "PP" else None     # PP: only the error that moves m0
             if orders:
                 mg = magnus_with_gradient(X, dX)
                 for k in orders:
                     A, dA = mg[k - 1]
-                    if cfg.gate == "PP":
-                        A, dA = np.cross(A, self.m0), np.cross(dA, self.m0)
+                    if pp_m0 is not None:
+                        A, dA = np.cross(A, pp_m0), np.cross(dA, pp_m0)
                     w = st.weight(k) / self.T ** k * norm
                     rows.append(w * A); jac.append(w * dA.T)
                     key = f"|A{k}|/T^{k}" + (" ⊥m0" if cfg.gate == "PP" else "")
@@ -473,23 +616,25 @@ class GrapeProblem:
                 U0d = Xa[0].conj().T
                 B = _vec(U0d @ Xa[1], 1)
                 dB = _vec(np.conj(np.swapaxes(dXa[:, 0], -1, -2)) @ Xa[1] + U0d @ dXa[:, 1], 1)
-                if cfg.gate == "PP":
-                    B, dB = np.cross(B, self.m0), np.cross(dB, self.m0)
+                if pp_m0 is not None:
+                    B, dB = np.cross(B, pp_m0), np.cross(dB, pp_m0)
                 nut = 2 * math.pi * self.umax * self.T              # maximal nutation angle
                 w = st.weight("b1") / nut * norm
                 rows.append(w * B); jac.append(w * dB.T)
                 summ["|B1|/(Ω T)"] = max(summ.get("|B1|/(Ω T)", 0.0), float(np.linalg.norm(B) / nut))
-            if cfg.gate != "none":
-                R, dR = rotation_with_gradient(X[0], dX[:, 0])
-                r, j = self._gate_rows(R, dR, st.weight("gate") * norm if local else st.weight("gate") / math.sqrt(len(pts)))
+            if tgt is not None:
+                R, dR = rot
+                r, j = self._gate_rows(R, dR, st.weight("gate") * norm if local else st.weight("gate") / math.sqrt(len(pts)),
+                                       tgt)
                 rows.append(r); jac.append(j)
-                if cfg.gate == "UR":                 # 1 - (3 + tr(Rt^T R)) / 6 = |R - Rt|_F^2 / 12 (no cancellation)
-                    inf.append(float(np.sum((R - self.Rt) ** 2)) / 12)
-                    gerr.append(rotation_angle_deg(self.Rt.T @ R))
+                kind, Rt, m0, mt = tgt
+                if kind == "UR":                     # 1 - (3 + tr(Rt^T R)) / 6 = |R - Rt|_F^2 / 12 (no cancellation)
+                    inf.append(float(np.sum((R - Rt) ** 2)) / 12)
+                    gerr.append(rotation_angle_deg(Rt.T @ R))
                 else:                                # 1 - (1 + m . mt) / 2 = |m - mt|^2 / 4
-                    m = R @ self.m0
-                    inf.append(float(np.sum((m - self.mt) ** 2)) / 4)
-                    gerr.append(_angle_between_deg(m, self.mt))
+                    m = R @ m0
+                    inf.append(float(np.sum((m - mt) ** 2)) / 4)
+                    gerr.append(_angle_between_deg(m, mt))
         if inf:
             summ["max infidelity"] = float(np.max(inf))
             summ["mean infidelity"] = float(np.mean(inf))
@@ -896,12 +1041,94 @@ def band_quality(ps: PulseSequence, config: GrapeConfig, lo_hz, hi_hz, n=401, th
     return out
 
 
+def nearest_point_index(config: GrapeConfig, offsets_hz, scales):
+    """Index of the nearest point (offset and B1 distances relative to the spans of the points) for every
+    (scale, offset) of a grid: array (len(scales), len(offsets_hz))."""
+    pts = np.array(config.ensemble(), float)
+    so = max(float(np.ptp(pts[:, 0])), 1.0)
+    ss = max(float(np.ptp(pts[:, 1])), 1e-3)
+    S, O = np.meshgrid(np.asarray(scales, float), np.asarray(offsets_hz, float), indexing="ij")
+    d = ((O[..., None] - pts[:, 0]) / so) ** 2 + ((S[..., None] - pts[:, 1]) / ss) ** 2
+    return np.argmin(d, axis=-1)
+
+
+def fitted_freedom(ps: PulseSequence, config: GrapeConfig):
+    """(phi, tau) of the config's free z-rotation after the pulse, fitted at its points for this pulse (as in the
+    optimization, with the user weights); (0, 0) without freedom."""
+    if config.freedom == "none":
+        return 0.0, 0.0
+    from psa.design.fidelity import matrices
+    pts = config.ensemble()
+    targets = [goal_target(g) for g in config.point_targets()]
+    gi = [i for i, t in enumerate(targets) if t is not None]
+    if not gi:
+        return 0.0, 0.0
+    R = [matrices(ps, [pts[i][0]], [pts[i][1]])[0, 0] for i in gi]
+    ab = [_overlaps(r, targets[i]) for r, i in zip(R, gi)]
+    uw = config.user_weights()
+    w = np.ones(len(pts)) if uw is None else uw
+    tau_max = config.max_delay_us * 1e-6 if config.max_delay_us > 0 else ps.duration
+    return fit_freedom([v[0] for v in ab], [v[1] for v in ab], [pts[i][0] for i in gi], w[gi], config.freedom, tau_max)
+
+
+def goal_infidelity_grid(ps: PulseSequence, config: GrapeConfig, offsets_hz, scales):
+    """1 - F on a (scale, offset) grid where every location is judged by the goal of its nearest point (the
+    config's gate goal or the point's own goal); NaN where that point has no gate goal. With freedom, the targets
+    are rotated by the z-rotation fitted at the points (phi + 2 pi offset tau, see fitted_freedom)."""
+    from psa.design.fidelity import infidelity_from_matrices, matrices
+    R = matrices(ps, offsets_hz, scales)
+    targets = config.point_targets()
+    if config.freedom != "none":
+        phi, tau = fitted_freedom(ps, config)
+        Z = rz(phi + 2 * math.pi * np.asarray(offsets_hz, float) * tau)             # (n_off, 3, 3), per column
+        idx = (nearest_point_index(config, offsets_hz, scales) if len({goal_key(t) for t in targets}) > 1
+               else np.zeros((len(scales), len(offsets_hz)), int))
+        out = np.full(idx.shape, np.nan)
+        for i_key, t in {goal_key(t): t for t in targets}.items():
+            if t is None:
+                continue
+            members = [i for i, u in enumerate(targets) if goal_key(u) == i_key]
+            mask = np.isin(idx, members)
+            if not np.any(mask):
+                continue
+            kind, Rt, m0, mt = goal_target(t)
+            if kind == "UR":
+                full = np.sum((R - Z @ Rt) ** 2, axis=(-2, -1)) / 12
+            else:
+                full = np.sum((R @ m0 - Z @ mt) ** 2, axis=-1) / 4
+            out[mask] = full[mask]
+        return out
+    if len({goal_key(t) for t in targets}) == 1:                   # one goal everywhere
+        idx = np.zeros((len(scales), len(offsets_hz)), int)
+    else:
+        idx = nearest_point_index(config, offsets_hz, scales)
+    out = np.full(idx.shape, np.nan)
+    groups = {}
+    for i, t in enumerate(targets):
+        groups.setdefault(goal_key(t), (t, []))[1].append(i)
+    for key, (t, members) in groups.items():
+        if t is None:
+            continue
+        mask = np.isin(idx, members)
+        if np.any(mask):
+            out[mask] = infidelity_from_matrices(R[mask], goal_reference(t))
+    return out
+
+
+def goal_reference(goal):
+    """The fidelity-module reference dict of a goal dict."""
+    if goal["gate"] == "UR":
+        return {"kind": "UR", "axis": goal["axis"], "angle": goal["angle"]}
+    return {"kind": "PP", "m0": goal["m0"], "mt": goal["mt"]}
+
+
 def area_quality(ps: PulseSequence, config: GrapeConfig, n_offsets=201, n_b1=11, thresholds=(1e-3, 1e-4, 1e-5)):
     """Gate infidelity on a fine test grid over the area of the point selection (offset range x B1 range;
     one B1 value if all points have the same scaling). Shows what happens between the points. Returns
     None without a gate goal or if all points have the same offset; else worst / mean infidelity, the fraction
     of the area below each threshold, the position of the worst value and the grid size."""
-    if config.gate == "none":
+    targets = config.point_targets()
+    if all(t is None for t in targets):
         return None
     pts = config.ensemble()
     offs, scales = [p[0] for p in pts], [p[1] for p in pts]
@@ -909,7 +1136,10 @@ def area_quality(ps: PulseSequence, config: GrapeConfig, n_offsets=201, n_b1=11,
         return None
     o = np.linspace(min(offs), max(offs), int(n_offsets))
     sc = np.linspace(min(scales), max(scales), int(n_b1)) if max(scales) > min(scales) else np.array([scales[0]])
-    inf = np.maximum(np.array([band_infidelity(ps, config, o, scale=s) for s in sc]), 0.0)
+    inf = goal_infidelity_grid(ps, config, o, sc)
+    if np.all(np.isnan(inf)):
+        return None
+    inf = np.where(np.isnan(inf), 0.0, np.maximum(inf, 0.0))
     i, j = np.unravel_index(int(np.argmax(inf)), inf.shape)
     out = {"worst infidelity": float(inf[i, j]), "mean infidelity": float(np.mean(inf)),
            "worst at offset [kHz]": float(o[j] / 1e3), "worst at B1 [%]": float(sc[i] * 100), "grid": inf.shape}

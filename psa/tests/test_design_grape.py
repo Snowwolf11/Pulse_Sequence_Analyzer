@@ -12,7 +12,7 @@ from psa.design import metrics
 from psa.design.grape import (GrapeConfig, GrapeProblem, Search, control_noise, exploration_preset, optimize,
                                optimize_multistart, propagator_and_gradient, rotation_with_gradient, run_task, search,
                                spline_basis, stage_plan, lawson_update, band_infidelity,
-                               band_quality, area_quality)
+                               band_quality, area_quality, goal_infidelity_grid, fit_freedom, rz)
 from psa.design.optimize import SolverSettings
 from psa.design.pulse import PulseSequence
 from psa.rotations import propagate_batch, quaternion_to_matrix
@@ -42,6 +42,9 @@ CONFIGS = {
                                             n_spline=9, max_amp_rate=5, max_phase_rate_khz=5, smooth_weight=0.01),
     "local weighted points at scalings": GrapeConfig(mode="local", points=[[-1e3, 0.9, 1.0], [2e3, 1.1, 3.0]],
                                                      orders=[1, 2], b1=True, gate="UR"),
+    "mixed per-point goals": GrapeConfig(mode="local", orders=[1], gate="UR", points=[
+        [-1e3, 1.0, 1.0, {"gate": "PP", "m0": [0, 0, 1], "mt": [0, 1, 0]}], [0.0, 0.95, 2.0, None],
+        [3e3, 1.05, 1.0, {"gate": "UR", "axis": [0, 0, 1], "angle": 0.0}]]),
     "broadband weighted points": GrapeConfig(mode="broadband", points=[[-1e3, 0.95, 2.0], [0.0, 1.0, 1.0], [4e3, 1.05, 0.5]],
                                              gate="PP"),
 }
@@ -441,6 +444,142 @@ def test_area_quality():
     assert q1["grid"] == (1, 31)                                         # one B1 value
     assert area_quality(ps, cfg.replace(points=[[0.0, 0.9], [0.0, 1.1]])) is None        # no offset range
     assert area_quality(ps, cfg.replace(mode="local", gate="none", orders=[1])) is None  # no gate goal
+
+
+UR90X = {"gate": "UR", "axis": [1, 0, 0], "angle": 90.0}
+PP_ZY = {"gate": "PP", "m0": [0, 0, 1], "mt": [0, 1, 0]}
+
+
+def test_per_point_goals():
+    """Every point may have its own goal; without one it uses the config's gate goal."""
+    ps = random_pulse(50, 11)
+    for mode, kw in (("broadband", {}), ("local", {"orders": [1, 2]})):
+        base = dict(mode=mode, gate="UR", target_angle_deg=180, **kw)
+        # an own goal equal to the default changes nothing
+        r0, J0, _ = _goals(ps, points=[[-1e3, 1.0], [2e3, 0.9]], **base)
+        r1, J1, _ = _goals(ps, points=[[-1e3, 1.0, 1.0, {"gate": "UR", "axis": [1, 0, 0], "angle": 180}], [2e3, 0.9]], **base)
+        assert np.allclose(r0, r1, atol=1e-15) and np.allclose(J0, J1, atol=1e-15)
+        # mixed goals = the single-point problems with those goals as gate goal, each / sqrt(2)
+        rm, Jm, pm = _goals(ps, points=[[-1e3, 1.0, 1.0, UR90X], [2e3, 0.9, 1.0, PP_ZY]], **base)
+        ra, Ja, _ = _goals(ps, **dict(base, points=[[-1e3, 1.0]], target_angle_deg=90))
+        rb, Jb, _ = _goals(ps, **dict(base, points=[[2e3, 0.9]], gate="PP", m0=[0, 0, 1], m_target=[0, 1, 0]))
+        assert np.allclose(rm, np.r_[ra, rb] / math.sqrt(2), atol=1e-15), mode
+        assert np.allclose(Jm, np.vstack([Ja, Jb]) / math.sqrt(2), atol=1e-15), mode
+    # gate "none" is fine if every point has a goal (broadband) / any goal (local)
+    GrapeConfig(mode="broadband", gate="none", points=[[0.0, 1.0, 1.0, UR90X]]).check()
+    for bad in (dict(mode="broadband", gate="none", points=[[0.0, 1.0, 1.0, UR90X], [1e3]]),
+                dict(mode="broadband", points=[[0.0, 1.0, 1.0, {"gate": "UR", "axis": [0, 0, 0], "angle": 1}]]),
+                dict(mode="broadband", points=[[0.0, 1.0, 1.0, {"gate": "XY"}]])):
+        try:
+            GrapeConfig(**bad).check()
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad}")
+
+
+def test_goal_infidelity_grid_uses_the_nearest_point():
+    ps = random_pulse(50, 12)
+    cfg = GrapeConfig(mode="broadband", gate="UR", points=[[-4e3, 1.0, 1.0, UR90X], [4e3, 1.0, 1.0, PP_ZY]])
+    offs = np.linspace(-6e3, 6e3, 13)
+    inf = goal_infidelity_grid(ps, cfg, offs, [1.0])[0]
+    a = band_infidelity(ps, cfg.replace(points=[], target_angle_deg=90), offs)
+    b = band_infidelity(ps, cfg.replace(points=[], gate="PP", m0=[0, 0, 1], m_target=[0, 1, 0]), offs)
+    assert np.allclose(inf[offs < 0], a[offs < 0], atol=1e-14) and np.allclose(inf[offs > 0], b[offs > 0], atol=1e-14)
+    q = area_quality(ps, cfg, n_offsets=9)                          # the area spans the points: ±4 kHz
+    assert abs(q["worst infidelity"] - np.max(goal_infidelity_grid(ps, cfg, np.linspace(-4e3, 4e3, 9), [1.0]))) < 1e-14
+
+
+def test_selective_excitation():
+    """Band-selective excitation: z -> x inside ±1 kHz, z -> z (nothing) at 5-7 kHz, in one optimization."""
+    N = 600
+    ps = PulseSequence(np.full(N, 30.0), np.zeros(N), DT, UMAX)
+    ex = {"gate": "PP", "m0": [0, 0, 1], "mt": [1, 0, 0]}
+    stay = {"gate": "PP", "m0": [0, 0, 1], "mt": [0, 0, 1]}
+    pts = [[o, 1.0, 1.0, ex] for o in (-1e3, 0.0, 1e3)] + [[s * o, 1.0, 1.0, stay] for o in (5e3, 6e3, 7e3) for s in (-1, 1)]
+    cfg = GrapeConfig(mode="broadband", gate="none", points=pts, seed=3)
+    out, info = optimize(ps, cfg, SolverSettings(max_nfev=400))
+    assert info["values"]["max infidelity"] < 5e-3, info["values"]          # 300 µs: transition 1 -> 5 kHz is tight
+    q = goal_infidelity_grid(out, cfg, [0.0, 6e3, -6e3], [1.0])[0]
+    assert np.all(q < 5e-3) and info["values"]["mean infidelity"] < 1e-3
+
+
+def test_fit_freedom_recovers_phase_and_delay():
+    f = np.linspace(-8e3, 8e3, 17)
+    for phi, tau in ((0.7, 0.0), (-2.5, 23e-6), (1.0, -61e-6)):
+        th = phi + 2 * math.pi * f * tau
+        p, t = fit_freedom(np.cos(th), np.sin(th), f, np.ones_like(f), "linear", 100e-6)
+        assert abs(math.remainder(p - phi, 2 * math.pi)) < 1e-6 and abs(t - tau) < 1e-10, (phi, tau, p, t)
+    p, t = fit_freedom(np.cos(0.7 + 0 * f), np.sin(0.7 + 0 * f), f, np.ones_like(f), "phase", 0)
+    assert abs(p - 0.7) < 1e-12 and t == 0.0
+
+
+def _pp_targets_with_phase(ps, offs, phi, tau):
+    """PP z -> (the pulse's own transfer, rotated back by phi + 2 pi f tau) at each offset."""
+    R = quaternion_to_matrix(propagate_batch(ps.as_array(), DT, UMAX, np.asarray(offs, float)))
+    m = R @ np.array([0, 0, 1.0])
+    return [list(rz(-(phi + 2 * math.pi * o * tau)) @ mi) for o, mi in zip(offs, m)]
+
+
+def test_freedom_phase_and_linear():
+    """The pulse's own transfer up to a z-rotation after it (constant / linear in offset) is reached exactly with
+    the matching freedom, not without."""
+    ps = random_pulse(80, 13)
+    offs = [-3e3, -1e3, 2e3, 4e3]
+    for freedom, phi, tau in (("phase", 0.9, 0.0), ("linear", -1.2, 17e-6)):
+        pts = [[o, 1.0, 1.0, {"gate": "PP", "m0": [0, 0, 1], "mt": mt}]
+               for o, mt in zip(offs, _pp_targets_with_phase(ps, offs, phi, tau))]
+        fixed = GrapeProblem(ps, GrapeConfig(mode="broadband", gate="none", points=pts))
+        free = GrapeProblem(ps, GrapeConfig(mode="broadband", gate="none", points=pts, freedom=freedom))
+        s0, s1 = fixed.goals(fixed.x0)[2], free.goals(free.x0)[2]
+        assert s0["max infidelity"] > 1e-3 and s1["max infidelity"] < 1e-16, (freedom, s0, s1)
+        assert abs(s1["free phase [°]"] - math.degrees(phi)) < 1e-6
+        if freedom == "linear":
+            assert abs(s1["free delay [µs]"] - 17.0) < 1e-6
+        # the grid evaluation uses the same fitted rotation
+        g = goal_infidelity_grid(ps, free.cfg, offs, [1.0])[0]
+        assert np.all(g < 1e-16), g
+    # UR: own gate rotated by Rz(-0.4) is reached with "phase"
+    R0 = quaternion_to_matrix(propagate_batch(ps.as_array(), DT, UMAX, np.array([0.0])))[0]
+    Rt = rz(-0.4) @ R0
+    ang = math.degrees(math.acos(np.clip((np.trace(Rt) - 1) / 2, -1, 1)))
+    ax = np.array([Rt[2, 1] - Rt[1, 2], Rt[0, 2] - Rt[2, 0], Rt[1, 0] - Rt[0, 1]])
+    prob = GrapeProblem(ps, GrapeConfig(mode="broadband", points=[[0.0, 1.0]], gate="UR", target_axis=list(ax),
+                                        target_angle_deg=ang, freedom="phase"))
+    summ = prob.goals(prob.x0)[2]
+    assert summ["max infidelity"] < 1e-20 and abs(summ["free phase [°]"] - math.degrees(0.4)) < 1e-6
+
+
+def test_freedom_cost_gradient_is_exact():
+    """Variable projection: J^T r is the exact gradient of the cost (the fitted rotation is optimal)."""
+    ps = random_pulse(30, 14)
+    for kw in (dict(mode="broadband", gate="PP", freedom="linear", bb_offset_n=5),
+               dict(mode="local", orders=[1], gate="UR", freedom="phase", offsets_hz=[-2e3, 0.0, 3e3]),
+               dict(mode="broadband", gate="UR", freedom="linear", points=[[-2e3, 0.9, 1.0], [1e3, 1.0, 3.0, UR90X]])):
+        prob = GrapeProblem(ps, GrapeConfig(**kw))
+        p = prob.p0 + 0.05 * np.random.default_rng(1).standard_normal(len(prob.p0))
+
+        def cost(q):
+            u = prob.to_controls(q)[0]
+            r, _, _ = prob.goals(u)
+            return 0.5 * float(r @ r)
+        u, M = prob.to_controls(p)
+        r, J, _ = prob.goals(u)
+        grad = np.asarray(M.T @ (J.T @ r)).ravel()
+        h = 1e-6
+        fd = np.array([(cost(p + h * e) - cost(p - h * e)) / (2 * h) for e in np.eye(len(p))[:12]])
+        assert np.allclose(grad[:12], fd, rtol=1e-5, atol=1e-9), kw
+
+
+def test_linear_phase_makes_broadband_excitation_easier():
+    """Excitation z -> x over ±8 kHz in 150 µs: with a free linear phase the optimizer gets much further."""
+    ps = PulseSequence(np.full(300, 100.0), np.zeros(300), DT, UMAX)
+    res = {}
+    for freedom in ("none", "linear"):
+        cfg = GrapeConfig(mode="broadband", gate="PP", bb_offset_min_hz=-8e3, bb_offset_max_hz=8e3, bb_offset_n=17,
+                          freedom=freedom, seed=2)
+        out, info = optimize(ps, cfg, SolverSettings(max_nfev=150))
+        res[freedom] = info["values"]["max infidelity"]
+    assert res["linear"] < res["none"] / 3, res
 
 
 if __name__ == "__main__":

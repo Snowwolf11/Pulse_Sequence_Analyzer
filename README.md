@@ -363,7 +363,9 @@ parameters. The goals hold at a set of points (offset, B1 scaling, weight): an o
 lists and ranges (`-10:10:21`), or a custom selection drawn in a visual point editor (weights, lock to grid,
 save / load, the infidelity of the current pulse as background). At every point the gate goal is required
 (order 0, i.e. classical broadband GRAPE) and optionally the Taylor orders of the detuning error and the
-first-order B1 error (SCQC). The
+first-order B1 error (SCQC). Points may have their own goals (UR or PP, e.g. for selective pulses: excite
+inside a band, do nothing outside), and the goals may hold up to a free phase or a linear phase (a z-rotation
+after the pulse, fitted by the optimizer). The
 gate goal is none, UR (rotation) or PP (point to point); the 100 % amplitude limit is always kept.
 Optional Lawson reweighting evens out the errors across the offsets / grid points (smaller worst case).
 Against spiky results: a smoothness weight, soft limits of the amplitude and phase rates, or smooth spline

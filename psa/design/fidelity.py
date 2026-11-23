@@ -6,6 +6,9 @@ Reference ("what should the pulse do"):
     PP    point to point: initial magnetization m0 to a target
 Infidelity 1 - F, computed from the residual (no cancellation for small values):
     UR / own   1 - (3 + tr(Rt^T R)) / 6 = |R - Rt|_F^2 / 12   (= the gate fidelity (|tr U0^† U|^2 + 2) / 6)
+    points     the goals of the GRAPE tab at its points (per-point goals, freedom): every location is judged by
+               the goal of its nearest point (NaN where that point has no goal); with freedom (free phase /
+               linear phase) the targets are rotated by the z-rotation fitted at the points
     PP         1 - (1 + (R m0) . mt) / 2 = |R m0 - mt|^2 / 4
 
 A job (``run_job``) computes any of: the map over an offset × amplitude grid, a cut over offsets at a
@@ -31,7 +34,7 @@ def _unit(v):
     return v / n
 
 
-def _matrices(ps, offsets_hz, scales):
+def matrices(ps, offsets_hz, scales):
     """Rotation matrices of the pulse at every (scale, offset): shape (n_scales, n_offsets, 3, 3)."""
     from psa.rotations import propagate_batch, quaternion_to_matrix
     sc, of = np.meshgrid(np.asarray(scales, float), np.asarray(offsets_hz, float), indexing="ij")
@@ -43,14 +46,30 @@ def infidelity_grid(ps: PulseSequence, offsets_hz, scales, reference=None):
     """1 - F at every (scale, offset): array (len(scales), len(offsets_hz))."""
     ref = dict(reference or {"kind": "own"})
     kind = ref.get("kind", "own")
-    R = _matrices(ps, offsets_hz, scales)
+    if kind == "points":                     # per-point goals of the GRAPE tab: the nearest point's goal
+        from psa.design.grape import GrapeConfig, goal_infidelity_grid
+        cfg = GrapeConfig(mode="broadband", gate=ref.get("gate", "none"), target_axis=ref.get("axis", [1, 0, 0]),
+                          target_angle_deg=ref.get("angle", 180.0), m0=ref.get("m0", [0, 0, 1]),
+                          m_target=ref.get("mt", [1, 0, 0]), points=ref["points"], freedom=ref.get("freedom", "none"),
+                          max_delay_us=ref.get("max_delay_us", 0.0))
+        return goal_infidelity_grid(ps, cfg, offsets_hz, scales)
+    R = matrices(ps, offsets_hz, scales)
+    if kind == "own":
+        ref = {"kind": "own", "R": matrices(ps, [0.0], [1.0])[0, 0]}
+    return infidelity_from_matrices(R, ref)
+
+
+def infidelity_from_matrices(R, reference):
+    """1 - F of rotation matrices R (..., 3, 3) for a reference dict (UR / PP; "own" with its matrix "R")."""
+    ref = dict(reference)
+    kind = ref.get("kind", "own")
     if kind == "PP":
         m = R @ _unit(ref.get("m0", (0, 0, 1)))
         return np.sum((m - _unit(ref.get("mt", (1, 0, 0)))) ** 2, axis=-1) / 4
     if kind == "UR":
         Rt = rotation_from_axis_angle(_unit(ref.get("axis", (1, 0, 0))), float(ref.get("angle", 180.0)))
-    elif kind == "own":
-        Rt = _matrices(ps, [0.0], [1.0])[0, 0]
+    elif kind == "own" and "R" in ref:
+        Rt = np.asarray(ref["R"], float)
     else:
         raise ValueError(f"unknown reference {kind!r}")
     return np.sum((R - Rt) ** 2, axis=(-2, -1)) / 12
@@ -59,6 +78,9 @@ def infidelity_grid(ps: PulseSequence, offsets_hz, scales, reference=None):
 def summary(inf, thresholds=(1e-3, 1e-4, 1e-5)):
     """Worst / mean infidelity and the fraction of the values below each threshold."""
     inf = np.asarray(inf, float)
+    inf = inf[np.isfinite(inf)]                 # NaN: no goal there
+    if inf.size == 0:
+        return {"worst": float("nan"), "mean": float("nan"), **{f"below {t:g}": float("nan") for t in thresholds}}
     out = {"worst": float(np.max(inf)), "mean": float(np.mean(inf))}
     for t in thresholds:
         out[f"below {t:g}"] = float(np.mean(inf <= t))
