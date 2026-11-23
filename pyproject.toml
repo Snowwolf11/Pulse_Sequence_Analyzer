@@ -17,6 +17,7 @@ dependencies = [
     "dash",
     "plotly",
     "pyqtgraph",
+    "PyOpenGL",  # 3D animation tab
 ]
 
 [project.optional-dependencies]

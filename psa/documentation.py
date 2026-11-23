@@ -58,6 +58,26 @@ Stability Window (Tkinter / Dash)
 - Click **Calculate** to plot fidelity (or rotation angle if **Angle** is selected) vs. offset and amplitude.
 - PP/SS uses the initial magnetization from the settings; the target is its on-resonance final state.
 
+Animation Window (PySide6, needs OpenGL: python -m pip install PyOpenGL)
+The spin dynamics of the main window's pulse: the three Bloch-sphere panels in the rotating frame (rotating
+at the carrier frequency: an on-resonance spin feels only B1), the error curve in the toggling frame (the
+frame that follows the nominal rotation, where only the error accumulates). Four panels side by side (each can
+be hidden; the three Bloch-sphere views rotate together, drag to rotate, wheel to zoom):
+  • Ensemble: every spin of the ensemble (offsets in kHz and B1 values in %, every offset with every
+    value) on the Bloch sphere, colour = offset (blue → red, colour bar), size = B1, fading trails; the
+    selected spin is ringed; optional target direction (yellow ring).
+  • Effective field: the selected spin's magnetization (cyan), the effective field of the running
+    sub-pulse (orange: B1 and offset) and the precession circle around it.
+  • Rotation: the selected spin's rotation R(t) as the rotated frame x / y / z (red / green / blue, the final
+    frame faint), as DROPS droplets of the propagator U(t) (top rank 0 = identity part, bottom rank 1 =
+    rotation-axis part; colour = phase: red 0, yellow 90°, green 180°, blue 270°), or as the Q-bead of the
+    magnetization (sphere coloured red along m, green opposite).
+  • Error curve: the selected spin's error curve growing with time (green → red) with its tangent.
+Below: the pulse with a draggable time cursor, Play / Pause, time slider, playback duration, loop, trail
+length, start m0 (the magnetization of every spin at t = 0, e.g. z or x), the selected spin (offset, B1)
+and Export GIF (the visible panels, one pass of the pulse).
+The motion is exact at every instant (within a sub-pulse the rotation axis is constant).
+
 PS Window
 Shows the pulse sequence as plain text (PySide6: sub-tab "Text", one line per sub-pulse with start time,
 amplitude and phase; sub-tab "Plots": amplitude, phase (−180 … 180°) and the x / y amplitude components

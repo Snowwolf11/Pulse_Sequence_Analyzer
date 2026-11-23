@@ -311,7 +311,16 @@ phase; click **Refresh**. (Tkinter / Dash: amplitude range, offset range, mode, 
 
 ---
 
-## 6. Quality Images
+## 6. Animation
+
+The **Animation** tab (PySide6) animates the spin dynamics of the pulse: an ensemble of spins on the Bloch
+sphere (colour = offset), the effective field of one spin, its rotation (frame, DROPS droplets or Q-bead)
+and the growing error curve, with playback controls and GIF export. It needs OpenGL for Python
+(`PyOpenGL`, installed with the app); without it the tab shows a note.
+
+---
+
+## 7. Quality Images
 
 Configure:
 

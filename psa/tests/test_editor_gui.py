@@ -523,6 +523,42 @@ def test_main_window_facts_plots_and_stability():
     assert sp._proc is None and not proc.is_alive()
 
 
+def test_main_window_animation_tab():
+    """Animation tab: dynamics computed for the main window's pulse when shown, time slider / cursor / panels in
+    sync, playback advances, the rotation panel modes switch, panels can be hidden, bad input is reported."""
+    from psa.GUI_pyside6 import PulseSequenceAnalyzerQt
+    from psa.editor_gui import animation_tab as at
+    main = PulseSequenceAnalyzerQt()
+    main.show(); process(20)
+    path = os.path.join(tempfile.mkdtemp(), "p.csv")
+    ps = PulseSequence(np.full(80, 100.0), np.linspace(0, 180, 80), 0.5e-6, 1e4)
+    ps.save(path)
+    main.pulse_sequence_edit.setText(path); main.update_analysis()
+    a = main.animation_tab
+    if not at.HAVE_GL:                                      # no PyOpenGL: only the note
+        assert not a.panels; main.close(); return
+    assert a.dyn is None                                    # computed when shown
+    main.tabs.setCurrentWidget(a); process(30)
+    d = a.dyn
+    assert d is not None and d.n_ensemble == 11 and d.N == 80 and a.error.text() == ""
+    a.set_time(40.0)
+    assert a.slider.value() == 500 and np.isclose(a.cursor.value(), 20.0) and "20.00 / 40.00 µs" in a.time_label.text()
+    a.cursor.setValue(30.0); process(5)                     # dragging the cursor sets the time
+    assert np.isclose(a.tau, 60.0)
+    a.toggle_play(); assert a.timer.isActive()
+    t0 = a.tau; wait_until(lambda: a.tau != t0, 5); a.pause()
+    for mode in (1, 2, 0):
+        a.rot_mode.setCurrentIndex(mode); a.draw()
+    assert a.drop0.visible() is False and a.rot_arrows[0].line.visible()
+    a.show_checks["field"].setChecked(False)
+    assert a.mv.visible_keys() == ["ensemble", "rotation", "curve"]
+    a.off_edit.setText("-5:5:3"); a.b1_edit.setText("90, 110"); a.recompute()
+    assert a.dyn.n_ensemble == 6 and len(a._ens_colors) == 6
+    a.b1_edit.setText("x"); a.recompute()
+    assert "B1" in a.error.text() and a.dyn.n_ensemble == 6  # the last good one stays
+    main.close()
+
+
 def test_help_window():
     w = make_window()
     w.help_button.click(); process(20)

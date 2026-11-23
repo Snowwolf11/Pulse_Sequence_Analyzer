@@ -541,6 +541,9 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         self.tabs.addTab(self.torsion_plot, "Torsion")
 
         self._build_stability_tab()
+        from psa.editor_gui.animation_tab import AnimationTab
+        self.animation_tab = AnimationTab(self.current_pulse, self)        # spin dynamics in 3D (OpenGL)
+        self.tabs.addTab(self.animation_tab, "Animation")
         self._build_pulse_sequence_tab()
         self._build_options_tab()
 
@@ -553,6 +556,7 @@ class PulseSequenceAnalyzerQt(QMainWindow):
 
     def closeEvent(self, event):
         self.stability_panel.shutdown()
+        self.animation_tab.shutdown()
         super().closeEvent(event)
 
     def _build_pulse_sequence_tab(self):
@@ -939,6 +943,7 @@ class PulseSequenceAnalyzerQt(QMainWindow):
                 self.ps_matrix_text.setPlainText(self.pulse_text(ps))
                 self._plots_dirty = True
                 self.stability_panel.pulse_changed(ps)
+                self.animation_tab.pulse_changed(ps)
             self._refresh_pulse_plots()
             self.curve_data_text.setPlainText(self._pulse_facts + self.shown_curve_facts(result, ps, params))
             self.info_error_text.setPlainText(self.info_error_string(params))
