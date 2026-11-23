@@ -8,7 +8,7 @@ class AppDefaults:
     maximum_amplitude_hz: float = 10000.0
     vector_length: float = 1.0
     time_per_pulse_s: float = 0.5
-    inpo_fact: int = 5
+    inpo_fact: int = 1
     x_expand: float = 0.0
     offset_hz: float = 0.0
     scaling_percent: float = 100.0

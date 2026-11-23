@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 from psa.design.grape import band_quality, pulse_rates, run_task
 from psa.design.pulse import PulseSequence
-from psa.design.quick import QuickRun, b1_count, quick_config, rectangular_start
+from psa.design.quick import QuickRun, b1_count, quick_config, rectangular_start, stretch_pulse
 
 DT, UMAX = 0.5e-6, 1e4
 
@@ -57,7 +57,8 @@ def test_quick_run_searches_then_polishes_within_the_budget():
     ps0 = rectangular_start(T, DT, UMAX)
     clock = [0.0]
     q = QuickRun(ps0, cfg, st, budget_s=10.0, parallel=11, clock=lambda: clock[0], chunk=5)
-    start_score = q.best_any["score"]
+    start_score = q.start_rec["score"]
+    assert q.incumbent is None and q.best_any is None             # the start pulse is only the baseline
     assert len(q._ready) == 22 and q.phase == "search"
     phases = _drive(q, clock, 1.0)
     assert phases[-1] == "done" and "polish" in phases, phases
@@ -115,6 +116,38 @@ def test_quick_b1_range():
     assert abs(b["worst infidelity"] - s["band"]["worst infidelity"]) < 1e-12 and "worst at B1 [%]" in b
     nominal = band_quality(pulse, cfg, -4e3, 4e3, 201)
     assert b["worst infidelity"] >= nominal["worst infidelity"] - 1e-15    # the area contains the nominal line
+
+
+def test_quick_run_reserves_time_for_the_polish():
+    """Long slices (big problems): the search ends early enough for POLISH_SLICES polish slices, and the result
+    is never the unoptimized start pulse when optimized pulses exist."""
+    from psa.design.quick import POLISH_SLICES
+    T = 100e-6
+    cfg, st = quick_config(T, (-4e3, 4e3), "UR", (1, 0, 0), 90.0, dt=DT)
+    clock = [0.0]
+    q = QuickRun(rectangular_start(T, DT, UMAX), cfg, st, budget_s=100.0, parallel=11, clock=lambda: clock[0], chunk=5)
+    phases = _drive(q, clock, 15.0)                      # every cycle of slices takes 15 s of a 100 s budget
+    assert "polish" in phases and q._polished == 3 and q.slice_s == 15.0
+    assert q.search_deadline == 100.0 - POLISH_SLICES * 15.0          # earlier than at 80 s
+    pulse, s = q.best()
+    assert s["optimized"] and s["within_limits"]
+    # budget over before any polish: one polish round still runs, the result is an optimized pulse
+    clock = [0.0]
+    q = QuickRun(rectangular_start(T, DT, UMAX), cfg, st, budget_s=5.0, parallel=11, clock=lambda: clock[0], chunk=5)
+    _drive(q, clock, 30.0)
+    pulse, s = q.best()
+    assert q._polished == 3 and s["optimized"] and s["band"]["worst infidelity"] < q.start_rec["band"]["worst infidelity"]
+
+
+def test_stretch_pulse():
+    ps = PulseSequence(np.linspace(10, 90, 100), np.linspace(-170, 530, 100) % 360 - 180, DT, UMAX)
+    long = stretch_pulse(ps, 100e-6)
+    assert long.N == 200 and long.dt == DT and long.umax == UMAX
+    assert np.isclose(long.amplitude[0], ps.amplitude[0], atol=0.5) and np.isclose(long.amplitude[-1], 90, atol=0.5)
+    unwrapped = np.degrees(np.unwrap(np.radians(long.phase)))
+    assert np.all(np.diff(unwrapped) > 0) and np.max(np.abs(np.diff(unwrapped))) < 5    # no jumps from the wrap
+    same = stretch_pulse(ps, 50e-6)
+    assert np.allclose(same.amplitude, ps.amplitude) and np.allclose(np.cos(np.radians(same.phase - ps.phase)), 1)
 
 
 if __name__ == "__main__":

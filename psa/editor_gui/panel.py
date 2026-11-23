@@ -47,7 +47,7 @@ class SummaryPanel(QWidget):
         res = QGroupBox("Resulting pulse")
         rform = QFormLayout(res)
         self.labels = {}
-        for key, text in (("info", "pulse:"), ("amp", "max. amplitude:"), ("gate", "rotation angle:"),
+        for key, text in (("info", "pulse:"), ("amp", "max. amplitude:"), ("power", "avg. power:"), ("gate", "rotation angle:"),
                           ("axis", "rotation axis:"), ("A1", "1st order |A1|/T:"), ("A2", "2nd order |A2|/T²:"),
                           ("A3", "3rd order |A3|/T³:"), ("B1", "B1 scaling (1st):")):
             lab = QLabel("–")
@@ -173,6 +173,11 @@ class SummaryPanel(QWidget):
         peak = float(np.max(ps.amplitude))
         self.labels["amp"].setText(f"{peak:.2f} % = {peak * ps.umax / 1e5:.3f} kHz" + ("  (above the maximum!)" if peak > 100 + 1e-6 else ""))
         self.labels["amp"].setStyleSheet(f"color: {BAD};" if peak > 100 + 1e-6 else "")
+        rel = float(np.mean((np.asarray(ps.amplitude, float) / 100.0) ** 2))
+        self.labels["power"].setText(f"{100 * rel:.1f} % of a rect. pulse (power ∝ B1²: B1,rms {np.sqrt(rel) * ps.umax / 1e3:.3f} kHz)")
+        self.labels["power"].setToolTip("average RF power relative to a rectangular pulse at the maximum amplitude, "
+                                        "mean of (amplitude / 100 %)², and the RMS amplitude (power ∝ B1,rms²). "
+                                        "Energy = this × duration × the rectangular pulse's power.")
         self.labels["gate"].setText(f"{g['angle_deg']:.4f}°")
         self.labels["axis"].setText(fmt_vec(g["axis"], 4))
         for k in ("A1", "A2", "A3"):

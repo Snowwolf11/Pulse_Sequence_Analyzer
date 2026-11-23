@@ -47,8 +47,6 @@ from PySide6.QtWidgets import (
 from psa.app_backend import (
     AnalyzerParams,
     analyze_pulse_sequence,
-    StabilityParams,
-    calculate_stability_backend,
     QualityImageParams,
     calculate_quality_image_backend,
     build_curve_data_export_string,
@@ -446,11 +444,6 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         self.pulse_amplitude_spin.setDecimals(6)
         self.pulse_amplitude_spin.setValue(10)
 
-        self.vector_length_spin = QDoubleSpinBox()
-        self.vector_length_spin.setRange(-1e9, 1e9)
-        self.vector_length_spin.setDecimals(6)
-        self.vector_length_spin.setValue(1)
-
         self.time_per_pulse_spin = QDoubleSpinBox()
         self.time_per_pulse_spin.setRange(0, 1e9)
         self.time_per_pulse_spin.setDecimals(6)
@@ -458,7 +451,7 @@ class PulseSequenceAnalyzerQt(QMainWindow):
 
         self.inpo_fact_spin = QSpinBox()
         self.inpo_fact_spin.setRange(1, 1000000)
-        self.inpo_fact_spin.setValue(5)
+        self.inpo_fact_spin.setValue(DEFAULTS.inpo_fact)
 
         self.x_expand_spin = QDoubleSpinBox()
         self.x_expand_spin.setRange(-1e9, 1e9)
@@ -476,7 +469,6 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         self.scaling_spin.setValue(100)
 
         form.addRow("Pulse Amplitude [kHz]:", self.pulse_amplitude_spin)
-        form.addRow("Vector Length:", self.vector_length_spin)
         form.addRow("Time/pulse [µs]:", self.time_per_pulse_spin)
         form.addRow("Inpofact:", self.inpo_fact_spin)
         form.addRow("x_Expand:", self.x_expand_spin)
@@ -515,7 +507,7 @@ class PulseSequenceAnalyzerQt(QMainWindow):
 
         self.curve_data_text = QTextEdit()
         self.curve_data_text.setReadOnly(True)
-        self.curve_data_text.setMinimumHeight(190)
+        self.curve_data_text.setMinimumHeight(340)
         curve_group = QGroupBox("Curve Data")
         curve_layout = QVBoxLayout(curve_group)
         curve_layout.addWidget(self.curve_data_text)
@@ -551,51 +543,79 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         self._build_options_tab()
 
     def _build_stability_tab(self):
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
+        """Stability: the fidelity analysis of the editor (map over offset x amplitude, cuts, references, freedom;
+        computed on Refresh in a separate process)."""
+        from psa.editor_gui.fidelity_window import FidelityPanel
+        self.stability_panel = FidelityPanel(self.current_pulse, self, self._grape_goal)
+        self.tabs.addTab(self.stability_panel, "Stability")
 
-        controls = QHBoxLayout()
-        self.stability_group = QButtonGroup(self)
-        self.stability_pp = QRadioButton("PP")
-        self.stability_ur = QRadioButton("UR")
-        self.stability_angle = QRadioButton("Angle")
-        self.stability_group.addButton(self.stability_pp, 1)
-        self.stability_group.addButton(self.stability_ur, 2)
-        self.stability_group.addButton(self.stability_angle, 3)
-        self.stability_pp.setChecked(True)
+    def _grape_goal(self):
+        ed = getattr(self, "_editor_window", None)
+        return ed._grape_goal() if ed is not None else (None, False)
 
-        self.stability_amplitude_range = QDoubleSpinBox()
-        self.stability_amplitude_range.setRange(0, 1e9)
-        self.stability_amplitude_range.setValue(20)
-
-        self.stability_offset_range = QDoubleSpinBox()
-        self.stability_offset_range.setRange(0, 1e9)
-        self.stability_offset_range.setValue(20)
-
-        calc_button = QPushButton("Calculate")
-        calc_button.clicked.connect(self.calculate_stability)
-
-        controls.addWidget(self.stability_pp)
-        controls.addWidget(self.stability_ur)
-        controls.addWidget(self.stability_angle)
-        controls.addWidget(QLabel("Amplitude range [%]:"))
-        controls.addWidget(self.stability_amplitude_range)
-        controls.addWidget(QLabel("Offset range [kHz]:"))
-        controls.addWidget(self.stability_offset_range)
-        controls.addWidget(calc_button)
-
-        self.stability_plot = MplPlot(projection="3d")
-
-        layout.addLayout(controls)
-        layout.addWidget(self.stability_plot)
-
-        self.tabs.addTab(tab, "Stability")
+    def closeEvent(self, event):
+        self.stability_panel.shutdown()
+        super().closeEvent(event)
 
     def _build_pulse_sequence_tab(self):
+        sub = QTabWidget()
         self.ps_matrix_text = QTextEdit()
         self.ps_matrix_text.setReadOnly(True)
         self.ps_matrix_text.setPlainText("Pulse sequence will display here.")
-        self.tabs.addTab(self.ps_matrix_text, "Pulse_Sequence")
+        sub.addTab(self.ps_matrix_text, "Text")
+        self.ps_plot = MplPlot()
+        sub.addTab(self.ps_plot, "Plots")
+        self.ps_subtabs = sub
+        self.tabs.addTab(sub, "Pulse_Sequence")
+
+    def current_pulse(self):
+        """The analyzed pulse (PulseSequence: the input's sub-pulses, nominal amplitude), or None."""
+        return getattr(self, "_current_ps", None)
+
+    def _load_current_pulse(self, params):
+        from psa.design.pulse import PulseSequence
+        from psa.getPulseSequence import getPulseSequence
+        arr = np.asarray(getPulseSequence(params.pulse_sequence), float)
+        ps = PulseSequence(arr[:, 0], arr[:, 1], params.time_per_pulse_us * 1e-6, params.pulse_amplitude_khz * 1e3)
+        old = getattr(self, "_current_ps", None)
+        if (old is not None and old.N == ps.N and old.dt == ps.dt and old.umax == ps.umax
+                and np.array_equal(old.amplitude, ps.amplitude) and np.array_equal(old.phase, ps.phase)):
+            return old                                   # the same pulse (e.g. only the offset changed)
+        self._current_ps = ps
+        return ps
+
+    def pulse_text(self, ps):
+        lines = [f"# {ps.N} sub-pulses of {ps.dt * 1e6:g} µs, 100 % = {ps.umax / 1e3:g} kHz",
+                 "#   index    t_start [µs]   amplitude [%]    phase [°]"]
+        for i, (a, ph) in enumerate(zip(ps.amplitude, ps.phase)):
+            lines.append(f"{i + 1:9d}  {i * ps.dt * 1e6:13.4f}  {a:14.6f}  {ph:12.6f}")
+        return "\n".join(lines)
+
+    def plot_pulse(self, ps):
+        """Amplitude, phase and the x / y amplitude components of the pulse vs. time (step plots)."""
+        fig = self.ps_plot.figure
+        fig.clear()
+        t = np.arange(ps.N + 1) * ps.dt * 1e6
+        amp, ph = np.asarray(ps.amplitude, float), np.asarray(ps.phase, float)
+        rows = (("amplitude [%]", amp), ("phase [°]", (ph + 180.0) % 360.0 - 180.0),     # shown in −180 … 180°
+                ("amplitude x [%]", amp * np.cos(np.radians(ph))),
+                ("amplitude y [%]", amp * np.sin(np.radians(ph))))
+        axes = fig.subplots(len(rows), 1, sharex=True)
+        for i, (ax, (label, y)) in enumerate(zip(axes, rows)):
+            self.style_axes_2d(ax)
+            xs, ys = np.repeat(t, 2)[1:-1], np.repeat(y, 2)              # steps, no drop to 0 at the ends
+            if i == 1:                                                  # phase: no vertical line at a ±180° wrap
+                jump = np.where(np.abs(np.diff(y)) > 180)[0]
+                xs = np.insert(xs, 2 * jump + 2, np.nan); ys = np.insert(ys, 2 * jump + 2, np.nan)
+            ax.plot(xs, ys, color=LINE_COLOR, linewidth=1.2)
+            ax.set_ylabel(label, fontsize=8)
+            ax.tick_params(labelsize=8)
+        axes[1].set_ylim(-185, 185)
+        axes[-1].set_xlabel("time [µs]")
+        axes[0].set_title(f"100 % = {ps.umax / 1e3:g} kHz", fontsize=9)
+        fig.subplots_adjust(left=0.1, right=0.98, top=0.95, bottom=0.07, hspace=0.12)
+        self.ps_plot.ax = axes[0]
+        self.ps_plot.draw()
 
     def _build_options_tab(self):
         tab = QWidget()
@@ -831,7 +851,6 @@ class PulseSequenceAnalyzerQt(QMainWindow):
 
         self.pulse_sequence_edit.setText(self.PS)
         self.pulse_amplitude_spin.setValue(10)
-        self.vector_length_spin.setValue(self.Vector_Length)
         self.time_per_pulse_spin.setValue(self.T)
         self.inpo_fact_spin.setValue(self.InpoFact)
         self.x_expand_spin.setValue(self.x_Expand)
@@ -850,7 +869,7 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         return AnalyzerParams(
             pulse_sequence=self.pulse_sequence_edit.text(),
             pulse_amplitude_khz=self.pulse_amplitude_spin.value(),
-            vector_length=self.vector_length_spin.value(),
+            vector_length=DEFAULTS.vector_length,            # 1: the curve's length is the pulse duration
             time_per_pulse_us=self.time_per_pulse_spin.value(),
             inpo_fact=self.inpo_fact_spin.value(),
             x_expand=self.x_expand_spin.value(),
@@ -919,9 +938,12 @@ class PulseSequenceAnalyzerQt(QMainWindow):
                 "torsion",
             )
 
-            self.curve_data_text.setPlainText(self.curve_data_string(result))
+            ps = self._load_current_pulse(params)
+            self.curve_data_text.setPlainText(self.curve_data_string(result, ps, params))
             self.info_error_text.setPlainText(self.info_error_string(params))
-            self.ps_matrix_text.setPlainText(str(result.PS_mat))
+            self.ps_matrix_text.setPlainText(self.pulse_text(ps))
+            self.plot_pulse(ps)
+            self.stability_panel.pulse_changed(ps)
 
             return result
 
@@ -998,24 +1020,50 @@ class PulseSequenceAnalyzerQt(QMainWindow):
         ax.set_ylabel(y_label)
         plot.draw()
 
-    def curve_data_string(self, result):
+    def curve_data_string(self, result, ps, params):
+        """Facts of the pulse (as the editor's panel) and of the shown error curve."""
+        from psa.design import metrics
+        from psa.rotations import propagate_batch
+        fv = lambda v, d=4: "(" + ", ".join(f"{x:+.{d}f}" for x in v) + ")"
+        peak = float(np.max(ps.amplitude)) if ps.N else 0.0
+        rel = float(np.mean((ps.amplitude / 100.0) ** 2)) if ps.N else 0.0
+        a = metrics.analyze(ps, b1=True)
+        g, rb = a["gate"], a["robustness"]
+        scale, off = params.scaling_percent / 100.0, params.offset_khz * 1e3
+        q = propagate_batch(ps.as_array(), ps.dt, ps.umax * scale, off)
+        q = q if q[0] >= 0 else -q
+        s_ = np.linalg.norm(q[1:])
+        ang = 2 * np.degrees(np.arctan2(s_, q[0]))
+        ax_here = q[1:] / s_ if s_ > 1e-12 else np.array([0.0, 0.0, 1.0])
+        CM = np.asarray(result.CM, float) * 1e6                          # µs (vector length 1)
+        r_end = CM[-1] - CM[0]
+        area = 0.5 * np.sum(np.cross(CM[:-1] - CM[0], CM[1:] - CM[0]), axis=0)   # 1/2 ∫ r × dr, exact for the polygon
+        length = float(np.sum(np.linalg.norm(np.diff(CM, axis=0), axis=1)))
         return (
-            f"Pulse Sequence ({round(1E3 * result.totalRot) / 1E3}°)\n"
-            f"Angle to x-Axis= {result.phi}°;\n"
-            f"number of pulses = {result.numberOfPulses};\n"
-            f"Axy= {result.Axy};\n"
-            f"Axz= {result.Axz},\n"
-            f"Ayz= {result.Ayz};\n"
-            f"Integrated Curvature= {result.integrated_curvature};\n"
-            f"Integrated Torsion= {result.integrated_torsion};\n"
-            f"Integrated abs Torsion= {result.integrated_absolut_torsion};"
+            f"Pulse: {ps.N} sub-pulses × {ps.dt * 1e6:g} µs = {ps.duration * 1e6:.2f} µs\n"
+            f"max. amplitude: {peak:.2f} % = {peak * ps.umax / 1e5:.3f} kHz\n"
+            f"avg. power: {100 * rel:.1f} % of a rect. pulse (power ∝ B1²: B1,rms {np.sqrt(rel) * ps.umax / 1e3:.3f} kHz)\n"
+            f"\nGate (on resonance, 100 %):\n"
+            f"  rotation angle: {g['angle_deg']:.4f}°\n"
+            f"  rotation axis: {fv(g['axis'])}\n"
+            f"  1st order |A1|/T: {rb['A1_norm']:.3e}\n"
+            f"  2nd order |A2|/T²: {rb['A2_norm']:.3e}\n"
+            f"  3rd order |A3|/T³: {rb['A3_norm']:.3e}\n"
+            f"  B1 scaling (1st): {a['B1']['B1_norm']:.3e}\n"
+            f"\nShown curve ({params.offset_khz:g} kHz, {params.scaling_percent:g} %):\n"
+            f"  rotation there: {ang:.4f}° about {fv(ax_here)}\n"
+            f"  length: {length:.3f} µs; end point r(T) = {fv(r_end, 3)} µs, |r(T)| = {np.linalg.norm(r_end):.3e} µs\n"
+            f"  vector area ½∫r×dr = {fv(area, 3)} µs² (yz, xz, xy planes)\n"
+            f"  integrated curvature: {result.integrated_curvature:.4f} rad\n"
+            f"  integrated torsion: {result.integrated_torsion:.4f} rad, |torsion|: {result.integrated_absolut_torsion:.4f} rad\n"
+            f"  initial vector turned by {result.totalRot:.3f}° (final tangent at {result.phi:.3f}° from x in xy)"
         )
 
     def info_error_string(self, params):
         return (
             f"Update Number: {self.update_count}\n"
             f"Time per Pulse: {self.T * 10**6} µs\n"
-            f"Vector Length: {self.Vector_Length}\n"
+
             f"Maximum Amplitude: {self.maximumAmplitude / 1000} kHz\n"
             f"Offset: {self.Offset / 1000} kHz\n"
             f"InpoFact: {self.InpoFact}\n"
@@ -1028,63 +1076,6 @@ class PulseSequenceAnalyzerQt(QMainWindow):
     def append_info(self, message):
         current = self.info_error_text.toPlainText()
         self.info_error_text.setPlainText(f"{message}\n\n{current}")
-
-    def calculate_stability(self):
-        try:
-            self.inpo_fact_spin.setValue(1)
-            result = self.update_analysis()
-            if result is None:
-                return
-
-            stability_params = StabilityParams(
-                PS_mat=result.PS_mat,
-                time_per_pulse_s=self.T,
-                vector_length=self.Vector_Length,
-                maximum_amplitude_hz=self.maximumAmplitude,
-                scaling_range_percent=self.stability_amplitude_range.value(),
-                offset_range_kHz=self.stability_offset_range.value(),
-                stability_calculation_method=self.stability_group.checkedId(),
-                initial_vector=self.initialVector,
-                initial_magnetization=self.initialMagnetization,
-            )
-
-        except TypeError:
-            stability_params = StabilityParams(
-                PS_mat=self.latest_result.PS_mat,
-                time_per_pulse_s=self.T,
-                vector_length=self.Vector_Length,
-                maximum_amplitude_hz=self.maximumAmplitude,
-                scaling_range_percent=self.stability_amplitude_range.value(),
-                offset_range_khz=self.stability_offset_range.value(),
-                stability_calculation_method=self.stability_group.checkedId(),
-                initial_vector=self.initialVector,
-                initial_magnetization=self.initialMagnetization,
-            )
-
-        try:
-            X, Y, Z, quality, axis, angle = calculate_stability_backend(
-                stability_params
-            )
-
-            ax = self.stability_plot.ax
-            ax.clear()
-            self.style_axes_3d(ax)
-            ax.plot_surface(X, Y, Z, cmap="viridis", edgecolor="black", linewidth=0.1)
-            ax.set_title("Stability")
-            self.stability_plot.draw()
-
-            msg = (
-                f"Pulse Sequence stability\n"
-                f"Offset range: {self.stability_offset_range.value()} kHz\n"
-                f"Amplitude range: {self.stability_amplitude_range.value()} %\n"
-                f"rotation axis: {axis}\n"
-                f"rotation angle: {angle} °\n"
-                f"average quality: {quality}\n"
-            )
-            self.append_info(msg)
-
-        except Exception:
-            self.info_error_text.setPlainText(traceback.format_exc())
 
     def calculate_quality_images(self):
         try:

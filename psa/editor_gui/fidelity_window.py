@@ -84,12 +84,12 @@ def _range_row(lo, hi, n, unit, rng):
     return row, (a, b, c)
 
 
-class FidelityWindow(QDialog):
+class FidelityPanel(QWidget):
+    """The fidelity analysis (inputs, Refresh, map and cuts) as a widget: in the editor's fidelity window and in
+    the analyzer's Stability tab. Call ``shutdown()`` before it is destroyed (ends the worker process)."""
+
     def __init__(self, pulse_provider, parent=None, goal_provider=None):
         super().__init__(parent)
-        self.setWindowTitle("Fidelity analysis")
-        self.setWindowFlag(Qt.WindowType.Window, True)
-        self.resize(900, 900)
         self.pulse_provider = pulse_provider          # callable() -> PulseSequence or None
         self.goal_provider = goal_provider            # callable() -> (GRAPE gate goal or None, active)
         self.result = None                            # last result (+ the settings it was computed with)
@@ -516,7 +516,8 @@ class FidelityWindow(QDialog):
         self.map_info.setText(self._stats(r["map"]))
         self.canvas.draw_idle()
 
-    def closeEvent(self, event):
+    def shutdown(self):
+        """Stop polling and end the worker process."""
         self._poll.stop()
         self._pending = None
         if self._proc is not None:
@@ -525,4 +526,29 @@ class FidelityWindow(QDialog):
             except (OSError, ValueError):
                 pass
             self._kill_worker()
+
+
+class FidelityWindow(QDialog):
+    """The editor's fidelity analysis window: a FidelityPanel in a window (its attributes are the panel's)."""
+
+    def __init__(self, pulse_provider, parent=None, goal_provider=None):
+        super().__init__(parent)
+        self.setWindowTitle("Fidelity analysis")
+        self.setWindowFlag(Qt.WindowType.Window, True)
+        self.resize(900, 900)
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
+        self.panel = FidelityPanel(pulse_provider, self, goal_provider)
+        lay.addWidget(self.panel)
+
+    @property
+    def result(self):                         # QDialog.result() would shadow the panel's last result
+        return self.panel.result
+
+    def __getattr__(self, name):              # fw.refresh_button, fw.status, ... are the panel's
+        if name == "panel":
+            raise AttributeError(name)
+        return getattr(self.panel, name)
+
+    def closeEvent(self, event):
+        self.panel.shutdown()
         super().closeEvent(event)

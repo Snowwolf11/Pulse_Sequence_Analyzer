@@ -472,6 +472,43 @@ def test_save_and_send_to_main_window():
     w.close(); main.close()
 
 
+def test_main_window_facts_plots_and_stability():
+    """Analyzer main window: no vector length field, InpoFact 1, curve data with the editor's facts, the
+    Pulse_Sequence tab with text and plots, and the Stability tab = the fidelity panel."""
+    from psa.GUI_pyside6 import PulseSequenceAnalyzerQt
+    from psa.design import metrics
+    from psa.design.fidelity import infidelity_grid
+    main = PulseSequenceAnalyzerQt()
+    main.show(); process(20)
+    assert not hasattr(main, "vector_length_spin") and main.inpo_fact_spin.value() == 1
+    path = os.path.join(tempfile.mkdtemp(), "p.csv")
+    ps = PulseSequence(np.r_[np.full(60, 100.0), np.full(40, 50.0)], np.r_[np.zeros(60), np.full(40, 90.0)], 0.5e-6, 1e4)
+    ps.save(path)
+    main.pulse_sequence_edit.setText(path); main.update_analysis()
+    assert main.latest_result is not None, main.info_error_text.toPlainText()
+    text = main.curve_data_text.toPlainText()
+    g = metrics.gate(ps)
+    assert "100 sub-pulses × 0.5 µs = 50.00 µs" in text and f"{g['angle_deg']:.4f}°" in text
+    assert "avg. power: 70.0 % of a rect. pulse" in text and "|A1|/T" in text and "vector area" in text
+    cur = main.current_pulse()
+    assert cur.N == 100 and np.allclose(cur.amplitude, ps.amplitude) and cur.umax == 1e4
+    assert main.ps_matrix_text.toPlainText().splitlines()[2].split()[2:] == ["100.000000", "0.000000"]
+    assert len(main.ps_plot.figure.axes) == 4
+    sp = main.stability_panel
+    sp.map_off[2].setValue(11); sp.map_amp[2].setValue(3); sp.cut_off_range[2].setValue(21); sp.cut_amp_range[2].setValue(5)
+    sp.refresh_button.click(); wait_until(lambda: not sp.busy, 120)
+    assert sp.result is not None and sp.result["map"].shape == (3, 11), sp.status.text()
+    assert np.allclose(sp.result["map"], infidelity_grid(ps, np.linspace(-10e3, 10e3, 11), [0.8, 1.0, 1.2]))
+    main.offset_spin.setValue(2.0); main.update_analysis()
+    assert "Shown curve (2 kHz, 100 %)" in main.curve_data_text.toPlainText()
+    assert main.current_pulse() is cur and "has changed" not in sp.status.text()       # same pulse
+    main.time_per_pulse_spin.setValue(1.0); main.update_analysis()
+    assert main.current_pulse() is not cur and "the pulse has changed since" in sp.status.text()
+    proc = sp._proc
+    main.close(); process(20)
+    assert sp._proc is None and not proc.is_alive()
+
+
 def test_help_window():
     w = make_window()
     w.help_button.click(); process(20)
@@ -1104,6 +1141,8 @@ def test_grape_quick_series_library():
     tab.q_series_check.setChecked(True)
     assert not tab.q_dur_hi_spin.isHidden() and tab.q_budget_label.text() == "total time:"
     tab.q_dur_spin.setValue(40.0); tab.q_dur_hi_spin.setValue(60.0); tab.q_count_spin.setValue(3)
+    assert not tab.q_warm_check.isHidden()
+    tab.q_warm_check.setChecked(True)
     durs, budgets = tab.series_plan()
     assert [round(x * 1e6) for x in durs] == [40, 50, 60] and np.isclose(sum(budgets), 30.0)
     assert budgets[2] > budgets[0] and "3 pulses: 40, 50, 60 µs" in tab.q_points_info.text()
@@ -1115,6 +1154,10 @@ def test_grape_quick_series_library():
     idx = read_index(lib)
     assert [p["file"] for p in idx["pulses"]] == ["pulse_0040us.bruker", "pulse_0050us.bruker", "pulse_0060us.bruker"]
     assert idx["settings"]["n_pulses"] == 3 and all(os.path.exists(os.path.join(lib, p["file"])) for p in idx["pulses"])
+    from psa.design.quick import stretch_pulse                         # warm start: the 60 µs run began from 50 µs
+    prev = PulseSequence.load(os.path.join(lib, "pulse_0050us.bruker"), tab.dt, tab.umax)
+    assert idx["settings"]["warm_start"] and tab.start_pulse.N == 120
+    assert np.allclose(tab.start_pulse.amplitude, stretch_pulse(prev, 60e-6).amplitude, atol=1e-4)
     assert tab.status.text().startswith("series finished: 3 of 3 pulses") and tab.last_library == lib
     lw = tab.library_window
     assert lw.table.rowCount() == 3 and len(lw.worst_curve.getData()[0]) == 3

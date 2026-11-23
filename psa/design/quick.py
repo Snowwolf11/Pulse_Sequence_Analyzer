@@ -16,9 +16,13 @@ Driver (QuickRun, like the study's emulated quick mode): the Search tasks run in
 evaluations, so the run can follow a wall-clock budget. Every slice is scored on a fine test grid (401
 offsets over the band; with a B1 range: 201 offsets x 4 times the B1 density, the worst value of the
 area decides). After 80 % of the budget (or when the search is over) the 3 best pulses without
-the limits are re-optimized with the limits (the "limits" stage) for the rest of the time. The result is
-the pulse with the smallest worst-case infidelity on the test grid among those that keep the rate limits
-(5 % tolerance); if none does, the best one overall (flagged).
+the limits are re-optimized with the limits (the "limits" stage) for the rest of the time. The polish
+always gets time for at least POLISH_SLICES slices: the driver measures how long a slice takes and ends
+the search earlier when slices are long (big problems, e.g. with a B1 range); if no optimized pulse keeps
+the limits yet when the budget is over, one polish round still runs. The result is the optimized pulse
+with the smallest worst-case infidelity on the test grid among those that keep the rate limits (5 %
+tolerance); if none does, the best optimized one (flagged). Only pulses better than the start count; if
+none is, the result is flagged as not optimized.
 
 QuickRun is executor-agnostic like Search: tasks() gives the tasks ready now (run each with
 grape.run_task, anywhere), submit(result) takes them back; ``done`` and best() tell the outcome.
@@ -43,6 +47,7 @@ CHUNK = 20                       # evaluations per slice
 POLISH = 0.2                     # last fraction of the budget: the best free pulses get the limits
 K_POLISH = 3
 TEST_POINTS = 401
+POLISH_SLICES = 3                # the polish gets at least this many slice durations
 TEST_POINTS_B1 = 201             # test offsets when a B1 range is optimized (times the B1 test values)
 B1_TEST_FACTOR = 4               # B1 test values per optimization B1 interval
 
@@ -93,6 +98,18 @@ def quick_config(duration_s, band_hz=(-1e4, 1e4), gate="UR", target_axis=(1, 0, 
     return cfg, SolverSettings(max_nfev=RECIPE["max_nfev"], gate_infidelity_tolerance=1e-8)
 
 
+def stretch_pulse(ps: PulseSequence, duration_s):
+    """The pulse stretched (or squeezed) in time to ``duration_s`` (same dt and rf amplitude): amplitude and
+    unwrapped phase interpolated linearly at the new sub-pulse centres (warm start of a series)."""
+    n = max(4, int(round(duration_s / ps.dt)))
+    x_old = (np.arange(ps.N) + 0.5) / ps.N
+    x_new = (np.arange(n) + 0.5) / n
+    amp = np.interp(x_new, x_old, np.asarray(ps.amplitude, float))
+    phase = np.degrees(np.interp(x_new, x_old, np.unwrap(np.radians(np.asarray(ps.phase, float)))))
+    phase = (phase + 180.0) % 360.0 - 180.0
+    return PulseSequence(np.clip(amp, 0.0, 100.0), phase, ps.dt, ps.umax)
+
+
 def rectangular_start(duration_s, dt, umax):
     n = max(4, int(round(duration_s / dt)))
     return PulseSequence(np.full(n, 100.0), np.zeros(n), dt, umax)
@@ -117,8 +134,10 @@ class QuickRun:
         kinds = [k for *_, k in stage_plan(config, ps.N)]
         self.limits_stage = kinds.index("limits") if "limits" in kinds else None
         self.phase = "search"                      # search -> polish -> done
-        self.incumbent = None                      # best pulse within the limits: dict(score, band, rates, amp, phase)
-        self.best_any = None                       # best pulse regardless of the limits
+        self.incumbent = None                      # best optimized pulse within the limits: dict(score, band, rates, amp, phase)
+        self.best_any = None                       # best optimized pulse regardless of the limits
+        self.start_rec = None                      # the start pulse (baseline; the result only if nothing returned)
+        self.slice_s = 0.0                         # longest slice so far (issue to return)
         self.pool = {}                             # cid -> (score, w): best free pulse per candidate
         self.improved = False                      # set by submit when the incumbent changed
         self.stopped = False
@@ -126,7 +145,7 @@ class QuickRun:
         self.slices = 0
         self._ready, self._out, self._tid = [], {}, 0
         self._polished = 0
-        self.consider(ps.amplitude, ps.phase, None, None)          # the start pulse is the baseline
+        self.consider(ps.amplitude, ps.phase, None, None, start=True)  # the start pulse: baseline only
         self._absorb()
 
     # ------------------------------------------------------------ public ---
@@ -164,15 +183,28 @@ class QuickRun:
         la, lp = self.limits
         return (la <= 0 or ar <= la * ACCEPT) and (lp <= 0 or pr <= lp * ACCEPT)
 
-    def consider(self, amp, phase, band, rates, cid=None, w=None):
+    def useful(self, rec):
+        """True if an optimized pulse is better (smaller worst-case infidelity) than the start pulse."""
+        return rec is not None and (self.start_rec is None or rec["score"] < self.start_rec["score"])
+
+    @property
+    def search_deadline(self):
+        """When the search ends: at 1 - polish of the budget, earlier if the polish needs POLISH_SLICES long
+        slices."""
+        return min(self.search_end, self.budget - POLISH_SLICES * self.slice_s)
+
+    def consider(self, amp, phase, band, rates, cid=None, w=None, start=False):
         """Record a pulse (band = band_quality on the test grid, rates = pulse_rates); returns True if it is
-        the new incumbent."""
+        the new incumbent. The start pulse (start=True) is only kept as the baseline."""
         if band is None:
             from psa.design.grape import band_quality, pulse_rates
             p = PulseSequence(np.asarray(amp), np.asarray(phase), self.ps.dt, self.ps.umax)
             band, rates = band_quality(p, self.cfg, *self.band), pulse_rates(p)
         score = math.log10(max(band["worst infidelity"], 1e-16))
         rec = dict(score=score, band=band, rates=tuple(rates), amp=list(amp), phase=list(phase))
+        if start:
+            self.start_rec = rec
+            return False
         if self.best_any is None or score < self.best_any["score"]:
             self.best_any = rec
         if cid is not None and w is not None and score < self.pool.get(cid, (math.inf,))[0]:
@@ -187,6 +219,7 @@ class QuickRun:
         if rec is None:
             return
         t = rec["task"]
+        self.slice_s = max(self.slice_s, self.clock() - rec.get("issued", self.clock()))
         if "error" in result:
             self.log.append(f"slice error: {result['error']}")
             if not rec["polish"]:
@@ -201,7 +234,7 @@ class QuickRun:
             if rec["left"] is not None:
                 rec["left"] -= max(info["nfev"] - prev, 1)
             finished = info["finished"] or (rec["left"] is not None and rec["left"] <= 0)
-            end = self.search_end if self.phase == "search" else self.budget
+            end = self.search_deadline if self.phase == "search" else self.budget
             if finished:
                 if not rec["polish"]:
                     info["history"] = []
@@ -216,9 +249,12 @@ class QuickRun:
     def best(self):
         """(pulse, summary) of the result: the incumbent (within the limits) or, if there is none, the best
         pulse overall (summary["within_limits"] False)."""
-        rec = self.incumbent if self.incumbent is not None else self.best_any
+        rec = (self.incumbent if self.useful(self.incumbent) else self.best_any if self.useful(self.best_any)
+               else self.start_rec or self.incumbent or self.best_any)   # nothing beat the start
         pulse = PulseSequence(np.asarray(rec["amp"]), np.asarray(rec["phase"]), self.ps.dt, self.ps.umax)
-        return pulse, {"within_limits": self.incumbent is not None, "band": rec["band"], "rates": rec["rates"],
+        return pulse, {"within_limits": rec is self.incumbent or (rec is self.start_rec and self.acceptable(rec["rates"])),
+                       "optimized": rec is not self.start_rec and self.useful(rec),
+                       "band": rec["band"], "rates": rec["rates"],
                        "slices": self.slices, "candidates": len(self.search.cands), "log": list(self.log),
                        "elapsed_s": self.elapsed(), "polished": self._polished}
 
@@ -227,6 +263,7 @@ class QuickRun:
         t = rec["task"]
         n = self.chunk if rec["left"] is None else max(1, min(self.chunk, rec["left"]))
         task = dict(t, tid=self._tid, state=rec["state"], budget=n, band=self.band, snapshots=False)
+        rec["issued"] = self.clock()
         self._out[self._tid] = rec
         self._ready.append(task)
         self._tid += 1
@@ -239,7 +276,7 @@ class QuickRun:
     def _advance(self):
         if self._out or self._ready:
             return
-        if self.phase == "search" and (self.search.done or self.elapsed() >= self.search_end):
+        if self.phase == "search" and (self.search.done or self.elapsed() >= self.search_deadline):
             if not self.search.done:
                 self.search.stop()
             self.log.append(f"search: {len(self.search.cands)} candidates, {self.slices} slices, "
@@ -252,8 +289,9 @@ class QuickRun:
 
     def _start_polish(self):
         self.phase = "polish"
-        if self.limits_stage is None or not self.pool or self.elapsed() >= self.budget:
-            self.phase = "done"
+        late = self.elapsed() >= self.budget
+        if self.limits_stage is None or not self.pool or (late and (self.useful(self.incumbent) or self.stopped)):
+            self.phase = "done"                    # over time: one round only if nothing keeps the limits yet
             return
         picks = sorted(self.pool.values(), key=lambda v: v[0])[:self.k_polish]
         base = {"tid": None, "cid": -1, "pulse": self.search._pulse, "config": self.cfg.to_dict(),

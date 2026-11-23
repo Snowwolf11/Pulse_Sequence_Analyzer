@@ -226,8 +226,8 @@ conda activate psa
 # Starting the Application
 
 ```bash
-python main.py --gui pyside6       # recommended desktop GUI
-python main.py                     # Tkinter GUI (fallback)
+python main.py                     # PySide6 desktop GUI (default)
+python main.py --gui tkinter       # Tkinter GUI (fallback)
 python main.py --gui dash          # browser GUI, then open http://127.0.0.1:8050
 ```
 
@@ -270,11 +270,10 @@ Main parameters:
 | Parameter | Description |
 |---|---|
 | Pulse Amplitude | Maximum RF amplitude |
-| Vector Length | Magnetization vector length |
 | Time/Pulse | Pulse duration |
 | Offset | Frequency offset |
 | Scaling | RF scaling |
-| InpoFact | Interpolation factor |
+| InpoFact | Interpolation factor (default 1) |
 | x_Expand | Visual x-axis expansion |
 
 ---
@@ -303,17 +302,10 @@ Playback buttons automatically sweep parameters to visualize curve evolution dyn
 
 ## 5. Stability Calculations
 
-Open the Stability tab and configure:
-
-- Amplitude range
-- Offset range
-- Stability mode
-
-Then click:
-
-```text
-Calculate Stability
-```
+Open the Stability tab. In the PySide6 GUI it is the fidelity analysis of the editor: fidelity over
+offset × amplitude (3D surface or heat map, ranges and resolution), cuts at a fixed amplitude / offset,
+reference own gate / UR / PP (or the GRAPE gate goal when the editor is open), optional free or linear
+phase; click **Refresh**. (Tkinter / Dash: amplitude range, offset range, mode, then Calculate Stability.)
 
 ---
 

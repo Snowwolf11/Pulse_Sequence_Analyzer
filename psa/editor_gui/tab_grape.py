@@ -26,7 +26,7 @@ from psa.design.grape import EXPLORATION_PRESETS, GrapeConfig, Search, explorati
 from psa.design.optimize import SolverSettings
 from psa.design.points import format_values, grid_points, is_grid, parse_values
 from psa.design.pulse import PulseSequence
-from psa.design.quick import QuickRun, quick_config, rectangular_start
+from psa.design.quick import QuickRun, quick_config, rectangular_start, stretch_pulse
 from psa.editor_gui.widgets import ACCENT, ACCENT_2, BAD, GOOD, MUTED_FG, lock_heights, make_plot, spawn_single_blas
 
 START_COLORS = ("#f59e0b", "#a78bfa", "#34d399", "#f472b6", "#60a5fa", "#fbbf24", "#f87171", "#2dd4bf")
@@ -183,6 +183,10 @@ class GrapeTab(QWidget):
         drow0.addWidget(self.q_dur_spin); drow0.addWidget(self.q_series_check); drow0.addWidget(self.q_dur_hi_spin)
         drow0.addWidget(self.q_count_spin)
         qf.addRow("duration:", drow0)
+        self.q_warm_check = QCheckBox("warm start: each pulse starts from the previous one, stretched")
+        self.q_warm_check.setToolTip("series: from the second duration on, the start pulse is the previous (shorter) "
+                                     "result stretched to the new duration instead of a rectangular pulse")
+        qf.addRow("", self.q_warm_check)
         self.q_series_check.toggled.connect(self._series_changed)
         brow0 = QHBoxLayout()
         self.q_lo_spin, self.q_hi_spin = QDoubleSpinBox(), QDoubleSpinBox()
@@ -246,7 +250,8 @@ class GrapeTab(QWidget):
         ll.addWidget(self.quick_box)
         self.quick_widgets = [self.q_dur_spin, self.q_lo_spin, self.q_hi_spin, self.q_b1_lo_spin, self.q_b1_hi_spin,
                               self.q_amp_rate_spin, self.q_phase_rate_spin, self.q_budget_spin, self.q_seed_spin,
-                              self.q_series_check, self.q_dur_hi_spin, self.q_count_spin, self.q_folder_edit,
+                              self.q_series_check, self.q_dur_hi_spin, self.q_count_spin, self.q_warm_check,
+                              self.q_folder_edit,
                               self.q_folder_button]
         for sp in (self.q_dur_hi_spin, self.q_count_spin):
             sp.valueChanged.connect(self._quick_info)
@@ -569,7 +574,7 @@ class GrapeTab(QWidget):
 
     def _series_changed(self, *args):
         on = self.q_series_check.isChecked()
-        self.q_dur_hi_spin.setVisible(on); self.q_count_spin.setVisible(on)
+        self.q_dur_hi_spin.setVisible(on); self.q_count_spin.setVisible(on); self.q_warm_check.setVisible(on)
         self.q_budget_label.setText("total time:" if on else "time budget:")
         self.q_folder_edit.setPlaceholderText("required for a series" if on else "not saved (single pulse)")
         self._quick_info()
@@ -972,6 +977,9 @@ class GrapeTab(QWidget):
                     k = self._series["index"]
                     T, budget = self._series["durations"][k], self._series["budgets"][k]
                     ps0, cfg, settings = self.quick_setup(T)
+                    prev = self._series.get("last_pulse")
+                    if self._series["settings"]["warm_start"] and prev is not None:
+                        ps0 = stretch_pulse(prev, T)          # warm start: the previous result, stretched
                 else:
                     ps0, cfg, settings = self.quick_setup()
             except (ValueError, OSError) as e:
@@ -1059,6 +1067,7 @@ class GrapeTab(QWidget):
                     "b1_percent": [self.q_b1_lo_spin.value(), self.q_b1_hi_spin.value()],
                     "rates": [self.q_amp_rate_spin.value(), self.q_phase_rate_spin.value()],
                     "seed": self.q_seed_spin.value(), "dt": self.dt, "umax_hz": self.umax,
+                    "warm_start": self.q_warm_check.isChecked(),
                     "config_of_longest": cfg.to_dict()}
         self._series = {"folder": path, "durations": durs, "budgets": budgets, "index": 0, "pulses": [],
                         "settings": settings}
@@ -1074,6 +1083,7 @@ class GrapeTab(QWidget):
             sr = self._series
             path = os.path.join(sr["folder"], library_file(T))
             pulse.save(path)
+            sr["last_pulse"] = pulse
             b = s["band"]
             sr["pulses"].append({"duration_us": round(T * 1e6, 6), "file": os.path.basename(path),
                                  "worst": b["worst infidelity"], "mean": b["mean infidelity"],
@@ -1256,7 +1266,9 @@ class GrapeTab(QWidget):
         b, (ar, pr) = s["band"], s["rates"]
         lo, hi = q.band[0] / 1e3, q.band[1] / 1e3
         head = "quick run stopped – best so far" if q.stopped else "quick run finished"
-        if not s["within_limits"]:
+        if not s.get("optimized", True):
+            head += " – no pulse better than the start was found in time (budget too short?)"
+        elif not s["within_limits"]:
             head += " – no pulse kept the rate limits: best one without them"
         if len(q.band) > 3:
             where = (f"over {lo:g} … {hi:g} kHz × {q.band[3] * 100:g} … {q.band[4] * 100:g} % ({q.band[2]}×{q.band[5]} "

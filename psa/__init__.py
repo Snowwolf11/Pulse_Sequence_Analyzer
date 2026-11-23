@@ -1,4 +1,4 @@
-def main(gui="tkinter"):
+def main(gui="pyside6"):
     # GUIs are imported lazily, so importing psa (e.g. psa.design in a solver process) stays light
     if gui == "tkinter":
         from .GUI import main as tkinter_main

@@ -12,7 +12,11 @@ Main Window
   • Press **Refresh** (or hit **Enter**) to recompute the Error Curve, Curvature, Torsion, and Path (trajectory of the vector tip).
   • Adjust **Offset** (kHz) and **Amplitude** (%) via sliders or their input fields.
 - Displays:
-  • **Curve Data**: numerical summaries for the current sequence and its error curve.
+  • **Curve Data** (PySide6): the pulse (sub-pulses, duration, max. amplitude, average power in % of a
+    rectangular pulse and as RMS amplitude), its gate on resonance (angle, axis), the robustness |A1|/T,
+    |A2|/T², |A3|/T³ and the first-order B1 scaling (as the editor's panel), and the shown curve at the set
+    offset / amplitude: the rotation there, length, end point r(T), vector area ½∫r×dr (exact for the
+    polygon), integrated curvature / torsion and how far the initial vector turns.
   • **Info & Errors**: status messages and diagnostics.
 - Shortcuts:
   • **Edit** opens the Pulse Sequence Editor.
@@ -38,9 +42,15 @@ Plots curvature along the curve. Updates on **Refresh**, **Enter**, or Offset/Am
 
 Torsion Window
 Plots torsion along the curve. Updates on **Refresh**, **Enter**, or Offset/Amplitude changes.
-Note: torsion is only accurate when `inpoFact = 1`.
+Note: torsion is only accurate when `inpoFact = 1` (the default).
 
-Stability Window
+Stability Window (PySide6)
+The fidelity analysis of the editor (see "Fidelity analysis window" below): fidelity over offset ×
+amplitude as 3D surface or heat map with ranges and resolution, cuts at a fixed amplitude / offset,
+reference own gate / GRAPE gate goal (if the editor is open) / UR / PP, optional free or linear phase;
+computed on Refresh in a separate process. The pulse is the one of the main window (nominal amplitude).
+
+Stability Window (Tkinter / Dash)
 - Choose pulse type: **State-to-State (SS)** or **Universal Rotation (UR)**.
 - Set ranges:
   • **Offset range** in kHz (0 kHz is center; e.g., 20 kHz → −10 kHz … +10 kHz).
@@ -49,7 +59,9 @@ Stability Window
 - PP/SS uses the initial magnetization from the settings; the target is its on-resonance final state.
 
 PS Window
-Shows the pulse sequence as plain text.
+Shows the pulse sequence as plain text (PySide6: sub-tab "Text", one line per sub-pulse with start time,
+amplitude and phase; sub-tab "Plots": amplitude, phase (−180 … 180°) and the x / y amplitude components
+A cos φ, A sin φ vs. time).
 
 Options Window
 
@@ -183,7 +195,9 @@ like classical GRAPE. The duration and the number of sub-pulses stay those of th
   pulses are re-optimized with the limits. The candidates run in short slices on all cores but one, so
   the run ends on time. Result: the pulse with the smallest worst-case infidelity over the band (401 test
   offsets) that keeps the rate limits (5 % tolerance); the status shows its worst / mean infidelity and
-  rates. Stop ends early and keeps the best so far. Tuned for UR gates over ±10 kHz at 10 kHz rf (in
+  rates. The polish always gets time for at least 3 slices (the search ends earlier when slices are long,
+  e.g. with a B1 range); only pulses better than the start count, and if none is found in time the
+  status says so (budget too short). Stop ends early and keeps the best so far. Tuned for UR gates over ±10 kHz at 10 kHz rf (in
   the study: 3–4e-4 worst infidelity for 410–450 µs, 2e-5 for 180° in 600 µs, in 20 min; most of it
   within the first few minutes). Optional B1 range (from–to %, 100 to 100 = off): the pulse should work
   over that amplitude range too. The offsets are then combined with n_B1 = 2 (s_max − s_min) · rf · T + 1
@@ -200,7 +214,9 @@ like classical GRAPE. The duration and the number of sub-pulses stay those of th
   decimal point: off7p5); index = the first one that does not
   overwrite an existing file. All numbers rounded half up.
   Series ("series to … , n pulses"): a pulse library, one quick run per duration (evenly spaced, rounded to
-  µs); the time is the total, split in proportion to the durations. The pulses go into a new folder named
+  µs); the time is the total, split in proportion to the durations. Warm start (option): from the second
+  duration on, the start pulse is the previous result stretched to the new duration (amplitude and
+  unwrapped phase interpolated) instead of a rectangular pulse. The pulses go into a new folder named
   like a single pulse with the duration range (pulse_0100-0600us_UR235-180_off20_B140_1/) as
   pulse_0405us.bruker, plus library.json with the settings and the score of every pulse (written after
   each one). Stop ends the series after saving the current pulse (best so far). "Library…" opens the

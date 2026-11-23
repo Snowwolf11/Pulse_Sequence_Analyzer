@@ -6,7 +6,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--gui",
         choices=["tkinter", "dash", "pyside6"],
-        default="tkinter",
+        default="pyside6",
     )
     args = parser.parse_args()
 
