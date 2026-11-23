@@ -1035,9 +1035,20 @@ def band_quality(ps: PulseSequence, config: GrapeConfig, lo_hz, hi_hz, n=401, sc
                  thresholds=(1e-3, 1e-4, 1e-5)):
     """Worst and mean infidelity over [lo, hi] on n test points (not the optimization points: shows dips
     between them), and the fraction of the band below each threshold. With n_scales > 1: over the area
-    [lo, hi] x [scale_lo, scale_hi] (B1 scaling), plus the position of the worst value."""
+    [lo, hi] x [scale_lo, scale_hi] (B1 scaling), plus the position of the worst value. With a freedom in the
+    config: up to the z-rotation fitted at the config's points (also returned: free phase / delay)."""
     offs = np.linspace(lo_hz, hi_hz, int(n))
-    if int(n_scales) <= 1:
+    if config.freedom != "none":                     # judged up to the z-rotation fitted at the points
+        scales = np.linspace(scale_lo, scale_hi, int(n_scales)) if int(n_scales) > 1 else np.array([1.0])
+        area = np.maximum(goal_infidelity_grid(ps, config, offs, scales), 0.0)
+        i, j = np.unravel_index(int(np.argmax(area)), area.shape)
+        inf = area.ravel()
+        phi, tau = fitted_freedom(ps, config)
+        out = {"worst infidelity": float(area[i, j]), "mean infidelity": float(np.mean(area)),
+               "free phase [°]": math.degrees(phi), "free delay [µs]": tau * 1e6}
+        if int(n_scales) > 1:
+            out.update({"worst at offset [kHz]": float(offs[j] / 1e3), "worst at B1 [%]": float(scales[i] * 100)})
+    elif int(n_scales) <= 1:
         inf = np.maximum(band_infidelity(ps, config, offs), 0.0)
         out = {"worst infidelity": float(np.max(inf)), "mean infidelity": float(np.mean(inf))}
     else:

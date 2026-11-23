@@ -994,6 +994,48 @@ def test_grape_quick_b1_range():
     w.close()
 
 
+def test_grape_quick_freedom_and_file_start():
+    """Quick mode: the freedom row of the gate goal applies (scored up to the fitted z-rotation); a start pulse
+    from a file sets the duration and is resampled / stretched to the editor's sub-pulses and durations."""
+    from psa.design.grape import band_quality
+    from psa.design.quick import stretch_pulse
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    tab.quick_radio.setChecked(True)
+    assert tab.freedom_widget.isVisibleTo(tab) and tab.q_start_edit.isHidden()
+    tab.gate_box.setCurrentIndex(2)                                     # PP z -> x
+    tab.freedom_box.setCurrentIndex(2)                                  # linear phase
+    tab.q_lo_spin.setValue(-4.0); tab.q_hi_spin.setValue(4.0)
+    # start pulse from a file with another dt and rf amplitude
+    d = tempfile.mkdtemp(); path = os.path.join(d, "start.bruker")
+    PulseSequence(np.full(30, 50.0), np.linspace(0, 90, 30), 1e-6, 2e4).save_bruker(path)
+    tab.q_start_box.setCurrentIndex(1)
+    assert not tab.q_start_edit.isHidden()
+    try:
+        tab.quick_setup()
+    except ValueError as e:
+        assert "pulse file" in str(e)
+    else:
+        raise AssertionError("no file, no error")
+    tab.q_start_edit.setText(path); tab._load_quick_start()
+    assert tab.q_dur_spin.value() == 30.0 and "30.00 µs" in tab.status.text()
+    ps0, cfg, st = tab.quick_setup()
+    assert ps0.N == 60 and ps0.dt == tab.dt and np.allclose(ps0.amplitude, 100.0)      # 50 % of 20 kHz = 100 % of 10
+    assert cfg.freedom == "linear" and cfg.gate == "PP"
+    tab.q_dur_spin.setValue(45.0)                                       # another duration: the file pulse stretched
+    assert tab.quick_setup()[0].N == 90
+    tab.q_dur_spin.setValue(30.0); tab.q_budget_spin.setValue(0.3)
+    tab.solve_button.click(); wait_until(lambda: not tab.solving, 120)
+    q = tab.last_quick["band"]
+    assert "free delay [µs]" in q and "free phase [°]" in q, tab.status.text()
+    assert np.isclose(band_quality(tab.result, cfg, -4e3, 4e3)["worst infidelity"], q["worst infidelity"])
+    assert "free delay" in tab.status.text()
+    tab.q_start_box.setCurrentIndex(0)
+    assert tab.q_start_edit.isHidden() and tab.quick_setup()[0].N == 60 and np.allclose(tab.quick_setup()[0].phase, 0)
+    w.close()
+
+
 def test_grape_per_point_goals():
     """Selective pulses: own goals per point in the point editor (default: the GRAPE gate goal), shown in colours
     and the table, used by the config, the optimization, the area score and the fidelity window."""
@@ -1073,7 +1115,7 @@ def test_grape_freedom():
     tab.freedom_box.setCurrentIndex(2)
     assert tab.freedom == "linear" and tab.delay_spin.isVisibleTo(tab)
     tab.quick_radio.setChecked(True)
-    assert not tab.freedom_widget.isVisibleTo(tab) and tab.quick_setup()[1].freedom == "none"
+    assert tab.freedom_widget.isVisibleTo(tab) and tab.quick_setup()[1].freedom == "linear"    # also in quick mode
     tab.expert_radio.setChecked(True)
     assert tab.freedom_widget.isVisibleTo(tab)
     tab.source_box.setCurrentText("rectangular"); tab.dur_spin.setValue(150.0); tab.load_button.click(); process(20)

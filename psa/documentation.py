@@ -210,6 +210,12 @@ like classical GRAPE. The duration and the number of sub-pulses stay those of th
   decides; the status shows where it is). Each evaluation is ~n_B1 times slower, so a longer budget helps
   (the line below the range shows the point count). The B1 rule is not yet part of the study
   (studies/quick_b1_study.py checks it).
+  Freedom: the gate goal's freedom row (none / free phase / linear phase) also applies in quick mode; the
+  run is then scored up to the z-rotation fitted at the points, and the status shows the fitted phase and
+  delay (not yet part of the study).
+  Start pulse: rectangular (default) or from a file (.bruker / .csv). A file sets the duration (the first
+  one of a series); it is resampled to the editor's sub-pulse duration and rf amplitude (same rf field) and
+  stretched to other durations. In a series without warm start every duration starts from it.
   Output folder (optional for a single pulse): the result is saved as
   pulse_{µs}_{goal}_{range}_{index}.bruker, e.g. pulse_0550us_UR235-180_off20_B140_2.bruker: duration
   rounded to µs (4 digits); the goal most points have, UR{axis}-{angle} or PP{m0}-{target} with vectors as

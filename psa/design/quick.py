@@ -63,9 +63,10 @@ def b1_count(b1_range, umax_hz, duration_s, density=None):
 
 def quick_config(duration_s, band_hz=(-1e4, 1e4), gate="UR", target_axis=(1, 0, 0), target_angle_deg=180.0,
                  m0=(0, 0, 1), m_target=(1, 0, 0), max_amp_rate=20.0, max_phase_rate_khz=50.0, seed=0, dt=None,
-                 b1_range=(1.0, 1.0), umax_hz=None, b1_density=None):
+                 b1_range=(1.0, 1.0), umax_hz=None, b1_density=None, freedom="none", max_delay_us=0.0):
     """(GrapeConfig, SolverSettings) of the quick recipe for a pulse of ``duration_s`` over ``band_hz`` and,
-    optionally, the amplitude (B1) scalings ``b1_range`` (1 = nominal; needs the rf amplitude ``umax_hz``)."""
+    optionally, the amplitude (B1) scalings ``b1_range`` (1 = nominal; needs the rf amplitude ``umax_hz``) and a
+    freedom of the gate goal ("phase" / "linear": up to a z-rotation after the pulse, see GrapeConfig)."""
     lo, hi = float(band_hz[0]), float(band_hz[1])
     if not hi > lo:
         raise ValueError("the band must have upper > lower offset")
@@ -93,6 +94,8 @@ def quick_config(duration_s, band_hz=(-1e4, 1e4), gate="UR", target_axis=(1, 0, 
                       n_kicks=RECIPE["n_kicks"], crossover_rate=0.0, coarse_levels=[])
     if n_b1 > 1:
         cfg.bb_scale_min, cfg.bb_scale_max, cfg.bb_scale_n = s_lo, s_hi, n_b1
+    if freedom != "none":
+        cfg.freedom, cfg.max_delay_us = freedom, float(max_delay_us)
     cfg.check()
     # "solved" at gate infidelity 1e-8, as in the study (the GRAPE default is stricter)
     return cfg, SolverSettings(max_nfev=RECIPE["max_nfev"], gate_infidelity_tolerance=1e-8)
@@ -108,6 +111,21 @@ def stretch_pulse(ps: PulseSequence, duration_s):
     phase = np.degrees(np.interp(x_new, x_old, np.unwrap(np.radians(np.asarray(ps.phase, float)))))
     phase = (phase + 180.0) % 360.0 - 180.0
     return PulseSequence(np.clip(amp, 0.0, 100.0), phase, ps.dt, ps.umax)
+
+
+def resample_pulse(ps: PulseSequence, dt, umax):
+    """The same pulse (same duration up to one sub-pulse, same rf field) on sub-pulses of ``dt`` with 100 % =
+    ``umax`` Hz: amplitude and unwrapped phase interpolated in time, amplitude rescaled by ps.umax / umax."""
+    n = max(4, int(round(ps.duration / dt)))
+    if n == ps.N:
+        amp, phase = np.asarray(ps.amplitude, float), np.asarray(ps.phase, float)
+    else:
+        x_old = (np.arange(ps.N) + 0.5) / ps.N
+        x_new = (np.arange(n) + 0.5) / n
+        amp = np.interp(x_new, x_old, np.asarray(ps.amplitude, float))
+        phase = np.degrees(np.interp(x_new, x_old, np.unwrap(np.radians(np.asarray(ps.phase, float)))))
+        phase = (phase + 180.0) % 360.0 - 180.0
+    return PulseSequence(amp * ps.umax / umax, phase, dt, umax)
 
 
 def rectangular_start(duration_s, dt, umax):

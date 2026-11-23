@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 from psa.design.grape import band_quality, pulse_rates, run_task
 from psa.design.pulse import PulseSequence
-from psa.design.quick import QuickRun, b1_count, quick_config, rectangular_start, stretch_pulse
+from psa.design.quick import QuickRun, b1_count, quick_config, rectangular_start, resample_pulse, stretch_pulse
 
 DT, UMAX = 0.5e-6, 1e4
 
@@ -148,6 +148,31 @@ def test_stretch_pulse():
     assert np.all(np.diff(unwrapped) > 0) and np.max(np.abs(np.diff(unwrapped))) < 5    # no jumps from the wrap
     same = stretch_pulse(ps, 50e-6)
     assert np.allclose(same.amplitude, ps.amplitude) and np.allclose(np.cos(np.radians(same.phase - ps.phase)), 1)
+
+
+def test_resample_and_freedom_scoring():
+    """A pulse file on another grid / rf amplitude keeps its rf field; quick mode with a freedom is scored up to
+    the z-rotation fitted at the points (a pure delay after the pulse costs nothing then)."""
+    from psa.rotations import propagate_batch
+    p = PulseSequence(np.full(50, 40.0), np.linspace(-30, 60, 50), 1e-6, 2.5e4)
+    q = resample_pulse(p, DT, UMAX)
+    assert q.N == 100 and np.isclose(q.duration, p.duration) and np.allclose(q.amplitude, 100.0)
+    assert np.allclose(propagate_batch(q.as_array(), q.dt, q.umax, 0.0)[0],
+                       propagate_batch(p.as_array(), p.dt, p.umax, 0.0)[0], atol=0.02)   # same rotation (sampled)
+    assert resample_pulse(q, DT, UMAX).N == 100
+    T = 60e-6
+    cfg = quick_config(T, (-3e3, 3e3), "PP", dt=DT)[0]
+    lin = quick_config(T, (-3e3, 3e3), "PP", dt=DT, freedom="linear", max_delay_us=100.0)[0]
+    assert (lin.freedom, lin.max_delay_us) == ("linear", 100.0) and cfg.freedom == "none"
+    a = rectangular_start(T, DT, UMAX)
+    a = PulseSequence(np.full(a.N, 41.7), np.zeros(a.N), DT, UMAX)          # ~ 90° pulse
+    b = PulseSequence(np.r_[a.amplitude, np.zeros(40)], np.r_[a.phase, np.zeros(40)], DT, UMAX)   # + 20 µs delay
+    lin_b = quick_config(b.duration, (-3e3, 3e3), "PP", dt=DT, freedom="linear", max_delay_us=100.0)[0]
+    qa = band_quality(a, lin, -3e3, 3e3, 201)
+    qb = band_quality(b, lin_b, -3e3, 3e3, 201)
+    assert np.isclose(qa["worst infidelity"], qb["worst infidelity"], rtol=1e-3, atol=1e-6)
+    assert np.isclose(abs(qb["free delay [µs]"] - qa["free delay [µs]"]), 20.0, atol=0.5)
+    assert band_quality(b, cfg, -3e3, 3e3, 201)["worst infidelity"] > 10 * qb["worst infidelity"]
 
 
 if __name__ == "__main__":

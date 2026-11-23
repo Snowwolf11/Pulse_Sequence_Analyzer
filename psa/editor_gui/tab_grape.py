@@ -26,7 +26,7 @@ from psa.design.grape import EXPLORATION_PRESETS, GrapeConfig, Search, explorati
 from psa.design.optimize import SolverSettings
 from psa.design.points import format_values, grid_points, is_grid, parse_values
 from psa.design.pulse import PulseSequence
-from psa.design.quick import QuickRun, quick_config, rectangular_start, stretch_pulse
+from psa.design.quick import QuickRun, quick_config, rectangular_start, resample_pulse, stretch_pulse
 from psa.editor_gui.widgets import ACCENT, ACCENT_2, BAD, GOOD, MUTED_FG, lock_heights, make_plot, spawn_single_blas
 
 START_COLORS = ("#f59e0b", "#a78bfa", "#34d399", "#f472b6", "#60a5fa", "#fbbf24", "#f87171", "#2dd4bf")
@@ -171,6 +171,18 @@ class GrapeTab(QWidget):
         qf = QFormLayout(self.quick_box)
         self.q_dur_spin = QDoubleSpinBox(); self.q_dur_spin.setRange(1, 1e5); self.q_dur_spin.setDecimals(1)
         self.q_dur_spin.setSuffix(" µs"); self.q_dur_spin.setValue(450.0)
+        srow0 = QHBoxLayout()
+        self.q_start_box = QComboBox(); self.q_start_box.addItems(["rectangular", "from file"])
+        self.q_start_box.setToolTip("start pulse of the quick run: a rectangular pulse (default) or a pulse file "
+                                    "(.bruker / .csv); a file sets the duration, and is stretched to other durations")
+        self.q_start_edit = QLineEdit(); self.q_start_edit.setPlaceholderText("pulse file (.bruker / .csv)")
+        self.q_start_edit.editingFinished.connect(self._load_quick_start)
+        self.q_start_button = QPushButton("…"); self.q_start_button.setFixedWidth(32)
+        self.q_start_button.clicked.connect(self._choose_quick_start)
+        srow0.addWidget(self.q_start_box); srow0.addWidget(self.q_start_edit, 1); srow0.addWidget(self.q_start_button)
+        qf.addRow("start pulse:", srow0)
+        self.q_start_box.currentIndexChanged.connect(self._quick_start_changed)
+        self._quick_file_pulse = None
         drow0 = QHBoxLayout()
         self.q_series_check = QCheckBox("series to")
         self.q_series_check.setToolTip("a pulse library: one quick run per duration, from this duration to the "
@@ -185,7 +197,7 @@ class GrapeTab(QWidget):
         qf.addRow("duration:", drow0)
         self.q_warm_check = QCheckBox("warm start: each pulse starts from the previous one, stretched")
         self.q_warm_check.setToolTip("series: from the second duration on, the start pulse is the previous (shorter) "
-                                     "result stretched to the new duration instead of a rectangular pulse")
+                                     "result stretched to the new duration instead of the start pulse above")
         qf.addRow("", self.q_warm_check)
         self.q_series_check.toggled.connect(self._series_changed)
         brow0 = QHBoxLayout()
@@ -243,14 +255,15 @@ class GrapeTab(QWidget):
         qf.addRow(self.q_points_info)
         for sp in (self.q_dur_spin, self.q_lo_spin, self.q_hi_spin, self.q_budget_spin):
             sp.valueChanged.connect(self._quick_info)
-        qnote = QLabel("Set the gate below. Tuned for UR gates over ±10 kHz at 10 kHz rf (the B1 range is not "
-                       "part of the study yet).")
+        qnote = QLabel("Set the gate (and optionally its freedom) below. Tuned for UR gates over ±10 kHz at 10 kHz rf "
+                       "(B1 range and freedom are not part of the study yet).")
         qnote.setStyleSheet(f"color: {MUTED_FG};"); qnote.setWordWrap(True)
         qf.addRow(qnote)
         ll.addWidget(self.quick_box)
         self.quick_widgets = [self.q_dur_spin, self.q_lo_spin, self.q_hi_spin, self.q_b1_lo_spin, self.q_b1_hi_spin,
                               self.q_amp_rate_spin, self.q_phase_rate_spin, self.q_budget_spin, self.q_seed_spin,
                               self.q_series_check, self.q_dur_hi_spin, self.q_count_spin, self.q_warm_check,
+                              self.q_start_box, self.q_start_edit, self.q_start_button,
                               self.q_folder_edit,
                               self.q_folder_button]
         for sp in (self.q_dur_hi_spin, self.q_count_spin):
@@ -513,6 +526,7 @@ class GrapeTab(QWidget):
         self.quick_radio.toggled.connect(self._run_mode_changed)
         self._run_mode_changed()
         self._series_changed()
+        self._quick_start_changed()
         lock_heights(self)
         self.load_start()
 
@@ -527,7 +541,6 @@ class GrapeTab(QWidget):
         for box in self.expert_boxes:
             box.setVisible(not quick)
         self.settings_button.setVisible(not quick)
-        self.freedom_widget.setVisible(not quick)          # the quick recipe has no freedom (yet)
         self.gate_box.model().item(0).setEnabled(not quick)          # quick mode needs a gate goal
         if quick and self.gate_box.currentIndex() == 0:
             self.gate_box.setCurrentIndex(1)
@@ -552,8 +565,52 @@ class GrapeTab(QWidget):
                                [s.value() for s in self.m0_spins], [s.value() for s in self.mt_spins],
                                self.q_amp_rate_spin.value(), self.q_phase_rate_spin.value(),
                                seed=self.q_seed_spin.value(), dt=self.dt, b1_range=self.quick_b1_range(),
-                               umax_hz=self.umax)
+                               umax_hz=self.umax, freedom=self.freedom, max_delay_us=self.delay_spin.value())
+        if self.q_start_box.currentIndex() == 1:
+            if self._quick_file_pulse is None:
+                raise ValueError("start pulse: choose a pulse file (or 'rectangular')")
+            fp = self._quick_file_pulse
+            if fp.dt != self.dt or fp.umax != self.umax:       # the editor's sub-pulse duration and rf amplitude
+                fp = resample_pulse(fp, self.dt, self.umax)
+            return stretch_pulse(fp, T), cfg, st
         return rectangular_start(T, self.dt, self.umax), cfg, st
+
+    def _quick_start_changed(self, *args):
+        on = self.q_start_box.currentIndex() == 1
+        self.q_start_edit.setVisible(on); self.q_start_button.setVisible(on)
+        if on and self._quick_file_pulse is not None:
+            self._set_quick_duration(self._quick_file_pulse)
+        self._quick_info()
+
+    def _choose_quick_start(self):
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(self, "Start pulse", self.q_start_edit.text(),
+                                              "Pulse files (*.bruker *.csv);;All files (*)")
+        if path:
+            self.q_start_edit.setText(path)
+            self._load_quick_start()
+
+    def _load_quick_start(self):
+        """Read the start pulse file; its duration becomes the (first) duration."""
+        path = self.q_start_edit.text().strip()
+        if not path:
+            self._quick_file_pulse = None; return
+        try:
+            ps = PulseSequence.load(path, self.dt, self.umax)       # a Bruker header sets dt / rf amplitude
+        except Exception as e:
+            self._quick_file_pulse = None
+            self._show(f"start pulse: could not read {path}: {e}", BAD)
+            return
+        self._quick_file_pulse = ps
+        self._set_quick_duration(ps)
+        peak = float(np.max(ps.amplitude)) * ps.umax / self.umax if ps.N else 0.0
+        note = f" – its peak is {peak:.1f} % of the editor's rf amplitude" if peak > 100 + 1e-6 else ""
+        self.q_start_edit.setToolTip(f"{ps.N} sub-pulses of {ps.dt * 1e6:g} µs = {ps.duration * 1e6:.2f} µs, "
+                                     f"100 % = {ps.umax / 1e3:g} kHz{note}")
+        self._show(f"start pulse loaded: {ps.N} sub-pulses, {ps.duration * 1e6:.2f} µs{note}", BAD if note else None)
+
+    def _set_quick_duration(self, ps):
+        self.q_dur_spin.setValue(round(ps.duration * 1e6, 1))     # also the first duration of a series
 
     def quick_b1_range(self):
         """(lower, upper) amplitude scaling of the quick mode (1 = nominal)."""
@@ -684,7 +741,7 @@ class GrapeTab(QWidget):
             axis, angle = [s.value() for s in self.axis_spins], self.angle_spin.value()
             m0, mt = [s.value() for s in self.m0_spins], [s.value() for s in self.mt_spins]
         freedom, max_delay = ((cfg.freedom, cfg.max_delay_us) if cfg is not None
-                              else (self.freedom if not self.quick_mode else "none", self.delay_spin.value()))
+                              else (self.freedom, self.delay_spin.value()))
         if cfg is not None:
             points = cfg.points or [[o, s_] for o, s_ in cfg.ensemble()]
         else:
@@ -1280,6 +1337,10 @@ class GrapeTab(QWidget):
                 f"{where}, mean "
                 f"{b['mean infidelity']:.2e}, {100 * b['fraction below 0.0001']:.0f} % of the band below 1e-4\n"
                 f"rates: amplitude {ar:.1f} %/µs, phase {pr:.1f} kHz")
+        if "free phase [°]" in b:
+            text += (f"\nfreedom: free phase {b['free phase [°]']:.2f}°"
+                     + (f", free delay {b['free delay [µs]']:.3f} µs" if self._cfg.freedom == "linear" else "")
+                     + " (fitted at the points; the score is up to this z-rotation)")
         if s["log"]:
             text += "\n" + "\n".join(s["log"])
         if self._failure:
