@@ -1030,6 +1030,77 @@ def test_grape_quick_b1_range():
     w.close()
 
 
+def test_grape_quick_live_display_before_the_limits():
+    """Quick mode: as long as no pulse keeps the rate limits (they come in the last stage), the live plots and the
+    pulse panels show the best pulse so far (status says so); then the best within the limits."""
+    from psa.design.quick import QuickRun
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    tab.quick_radio.setChecked(True)
+    tab.q_dur_spin.setValue(40.0)
+    ps0, cfg, st = tab.quick_setup()
+    tab.set_start(ps0)
+    lo, hi = tab.amp_plot.getViewBox().viewRange()[0]
+    assert lo <= 0 and 40 <= hi < 45                                          # time axis follows the start pulse
+    tab._quick = tab._search = QuickRun(ps0, cfg, st, 60.0)
+    tab._quick_shown = None
+    band = {"worst infidelity": 0.2, "mean infidelity": 0.05}
+    free = dict(score=-0.7, band=band, rates=(99.0, 99.0), amp=[50.0] * ps0.N, phase=[10.0] * ps0.N)
+    tab._quick.best_any = free                                                # outside the limits, no incumbent
+    tab._show_quick_best()
+    assert tab.result is not None and np.allclose(tab.result.amplitude, 50.0)
+    assert np.allclose(tab.amp_curve.getData()[1], 50.0)
+    assert "rate limits not applied yet" in tab._quick_progress_text() and "2.00e-01" in tab._quick_progress_text()
+    inc = dict(free, amp=[30.0] * ps0.N, band={"worst infidelity": 0.3, "mean infidelity": 0.1})
+    tab._quick.incumbent = inc                                                # within the limits: preferred
+    tab._show_quick_best()
+    assert np.allclose(tab.result.amplitude, 30.0) and "best within the limits" in tab._quick_progress_text()
+    tab._quick = None
+    w.close()
+
+
+def test_grape_shortest_pulse_window():
+    """Expert mode: "Shortest pulse…" takes the goal from the tab (orders without gaps, no freedom), runs the
+    search in a background process, shows every accepted pulse in the tab and ends with the checked result."""
+    import time
+    w = make_window()
+    tab = w.grape_tab
+    w.show_tab(tab)
+    tab.expert_radio.setChecked(True)
+    assert tab.shortest_button.isVisibleTo(tab)
+    tab.order_checks[1].setChecked(False); tab.order_checks[2].setChecked(True)
+    tab.open_shortest_window()
+    win = tab.shortest_window
+    assert "no gaps" in win.goal_label.text()
+    tab.order_checks[2].setChecked(False); tab.freedom_box.setCurrentIndex(1)
+    assert win.refresh_goal() is None and "freedom" in win.goal_label.text()
+    tab.freedom_box.setCurrentIndex(0); tab.b1_check.setChecked(True)
+    spec = win.refresh_goal()
+    assert spec.order == 0 and spec.b1 and "B1 1st order" in win.goal_label.text()
+    tab.b1_check.setChecked(False)
+    tab.angle_spin.setValue(90.0)
+    spec, text = tab.shortest_spec()
+    assert spec.order == 0 and not spec.b1 and "UR 90°" in text and abs(spec.lower_bound_s() - 25e-6) < 1e-12
+    # a real (fast) search: gate only, Rx(90°) reaches the bound 25 µs
+    shown = []
+    tab.pulseChanged.connect(lambda ps: shown.append(ps.N))
+    win.refresh_goal()
+    win.start_spin.setValue(40.0); win.workers_spin.setValue(2); win.time_spin.setValue(5.0)
+    win.start()
+    assert win.running and not tab.solve_button.isEnabled()
+    t0 = time.time()
+    while win.running and time.time() - t0 < 240:
+        process(200)
+    assert not win.running and tab.solve_button.isEnabled()
+    v = win.verification
+    assert v["ok"] and v["N"] == 50 and "reached the lower bound" in win.status.text()
+    assert tab.result is not None and tab.result.N == 50 and shown and shown[-1] == 50
+    assert win.log.toPlainText().strip() and win.save_button.isEnabled()
+    win.hide()
+    w.close()
+
+
 def test_grape_quick_freedom_and_file_start():
     """Quick mode: the freedom row of the gate goal applies (scored up to the fitted z-rotation); a start pulse
     from a file sets the duration and is resampled / stretched to the editor's sub-pulses and durations."""
@@ -1067,8 +1138,18 @@ def test_grape_quick_freedom_and_file_start():
     assert "free delay [µs]" in q and "free phase [°]" in q, tab.status.text()
     assert np.isclose(band_quality(tab.result, cfg, -4e3, 4e3)["worst infidelity"], q["worst infidelity"])
     assert "free delay" in tab.status.text()
+    assert cfg.multistart_noise == 0.1                                  # a real start: half of the starts near it
     tab.q_start_box.setCurrentIndex(0)
     assert tab.q_start_edit.isHidden() and tab.quick_setup()[0].N == 60 and np.allclose(tab.quick_setup()[0].phase, 0)
+    assert tab.quick_setup()[1].multistart_noise == 1.0                 # rectangular: the recipe as studied
+    for k, kind in ((2, "4H"), (3, "6H")):                              # robust identity starts
+        tab.q_start_box.setCurrentIndex(k)
+        assert tab.q_start_edit.isHidden() and tab.q_start_box.currentText() == kind
+        ps0, cfg4, _ = tab.quick_setup()
+        assert ps0.N == 60 and cfg4.multistart_noise == 0.1 and ps0.amplitude.max() <= 100.0
+        assert "amplitude clipped" in tab.q_points_info.text()           # 30 µs: much shorter than 398 / 490 µs
+    tab.q_dur_spin.setValue(500.0)
+    assert "clipped" not in tab.q_points_info.text() and tab.quick_setup()[0].N == 1000
     w.close()
 
 

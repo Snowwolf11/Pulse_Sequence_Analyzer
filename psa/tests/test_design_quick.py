@@ -175,6 +175,29 @@ def test_resample_and_freedom_scoring():
     assert band_quality(b, cfg, -3e3, 3e3, 201)["worst infidelity"] > 10 * qb["worst infidelity"]
 
 
+def test_real_start_pulses_and_family_starts():
+    """A real start pulse keeps the 22 starts, but the perturbed ones stay near it (mix); 4H / 6H starts are their
+    robust identity pulses brought to the duration (exact at their natural duration)."""
+    from psa.design.metrics import gate, robustness
+    from psa.design.quick import RECIPE, family_natural_duration, family_start, for_start_pulse, rescale_pulse
+    cfg, _ = quick_config(400e-6)
+    assert cfg.multistart_noise == RECIPE["spread"] == 1.0 and cfg.start_pool == "mix" and cfg.n_starts == 22
+    real, _ = quick_config(400e-6, real_start=True)
+    assert real.multistart_noise == RECIPE["start_spread"] == 0.1 and real.start_pool == "mix" and real.n_starts == 22
+    assert for_start_pulse(cfg).multistart_noise == 0.1 and cfg.multistart_noise == 1.0      # a copy
+    assert real.variant(2).start_noise == 0.1 and real.variant(1).start_kind == "random"
+    for kind, nat_us in (("4H", 398.0), ("6H", 490.0)):
+        assert np.isclose(family_natural_duration(kind, 1e4) * 1e6, nat_us)
+        p = family_start(kind, nat_us * 1e-6, 0.5e-6, 1e4)
+        assert p.N == round(nat_us * 2) and gate(p)["angle_deg"] < 1e-6 and robustness(p)["A1_norm"] < 1e-5
+        long = family_start(kind, 600e-6, 0.5e-6, 1e4)                  # longer: lower amplitude, same rotations
+        assert long.N == 1200 and np.max(long.amplitude) < 100 * nat_us / 600 + 1e-6
+        assert family_start(kind, 300e-6, 0.5e-6, 1e4).amplitude.max() <= 100.0     # shorter: clipped
+    ps = PulseSequence(np.full(100, 40.0), np.full(100, 20.0), 1e-6, 1e4)        # rescale: same rotation
+    r = rescale_pulse(ps, 50e-6, 0.5e-6, 2e4)
+    assert r.N == 100 and np.allclose(r.amplitude, 40.0) and np.isclose(gate(r)["angle_deg"], gate(ps)["angle_deg"])
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     failed = 0

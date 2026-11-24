@@ -11,6 +11,11 @@ The recipe is the winner of the quick-settings study (studies/quick_settings_stu
     limits       amplitude rate / phase rate as soft limits, switched on only in a last stage
     exploration  22 starts (mix of perturbed and random, spread 1.0, noise correlation 5 % of T),
                  one screening round of 30 evaluations, the best third continues (3000 evaluations each), no kicks
+    start pulse  rectangular (the study's start): the recipe as above, the start pulse is 1 of the 22 starts.
+                 A real start pulse (a file, 4H / 6H, the warm start of a series): the 10 perturbed starts stay
+                 near it (spread 0.1 instead of 1.0), the 11 random ones keep the exploration ("mix"; start-pulse
+                 study, studies/start_pulse_study.py, 2026-11-24: rectangular-start runs with spread 0.1 can get
+                 stuck, real start pulses gained up to ~0.2 decades on a wide band, none lost)
 
 Driver (QuickRun, like the study's emulated quick mode): the Search tasks run in slices of a few
 evaluations, so the run can follow a wall-clock budget. Every slice is scored on a fine test grid (401
@@ -40,7 +45,7 @@ from psa.design.pulse import PulseSequence
 
 RECIPE = dict(density=2.0, spline_us=6.0, smooth_weight=1e-6, n_starts=22, start_pool="mix", spread=1.0,
               correlation=0.05, screen_rounds=1, screen_nfev=30, keep_fraction=0.33, n_kicks=0, max_nfev=3000,
-              b1_density=2.0)
+              b1_density=2.0, start_spread=0.1)
 DEFAULT_LIMITS = dict(max_amp_rate=20.0, max_phase_rate_khz=50.0)
 ACCEPT = 1.05                    # a result may exceed the rate limits by 5 %
 CHUNK = 20                       # evaluations per slice
@@ -63,10 +68,12 @@ def b1_count(b1_range, umax_hz, duration_s, density=None):
 
 def quick_config(duration_s, band_hz=(-1e4, 1e4), gate="UR", target_axis=(1, 0, 0), target_angle_deg=180.0,
                  m0=(0, 0, 1), m_target=(1, 0, 0), max_amp_rate=20.0, max_phase_rate_khz=50.0, seed=0, dt=None,
-                 b1_range=(1.0, 1.0), umax_hz=None, b1_density=None, freedom="none", max_delay_us=0.0):
+                 b1_range=(1.0, 1.0), umax_hz=None, b1_density=None, freedom="none", max_delay_us=0.0,
+                 real_start=False):
     """(GrapeConfig, SolverSettings) of the quick recipe for a pulse of ``duration_s`` over ``band_hz`` and,
     optionally, the amplitude (B1) scalings ``b1_range`` (1 = nominal; needs the rf amplitude ``umax_hz``) and a
-    freedom of the gate goal ("phase" / "linear": up to a z-rotation after the pulse, see GrapeConfig)."""
+    freedom of the gate goal ("phase" / "linear": up to a z-rotation after the pulse, see GrapeConfig).
+    real_start: the start pulse is a real start (file, 4H / 6H, warm start), see for_start_pulse."""
     lo, hi = float(band_hz[0]), float(band_hz[1])
     if not hi > lo:
         raise ValueError("the band must have upper > lower offset")
@@ -96,9 +103,47 @@ def quick_config(duration_s, band_hz=(-1e4, 1e4), gate="UR", target_axis=(1, 0, 
         cfg.bb_scale_min, cfg.bb_scale_max, cfg.bb_scale_n = s_lo, s_hi, n_b1
     if freedom != "none":
         cfg.freedom, cfg.max_delay_us = freedom, float(max_delay_us)
+    if real_start:
+        cfg = for_start_pulse(cfg)
     cfg.check()
     # "solved" at gate infidelity 1e-8, as in the study (the GRAPE default is stricter)
     return cfg, SolverSettings(max_nfev=RECIPE["max_nfev"], gate_infidelity_tolerance=1e-8)
+
+
+def for_start_pulse(cfg: GrapeConfig) -> GrapeConfig:
+    """The quick config for a real start pulse: the perturbed starts stay near it (spread RECIPE["start_spread"]),
+    the random starts are kept (see the module doc)."""
+    return cfg.replace(multistart_noise=RECIPE["start_spread"])
+
+
+FAMILY_STARTS = {"4H": ("4H (0° UR, 2nd-order robust)", {"tau": 99.5}),      # 398 µs at 10 kHz
+                 "6H": ("6H (0° UR, 3rd-order robust)", {"TA": 4.15})}       # 490 µs at 10 kHz
+FAMILY_UMAX = 1e4                                                            # the parameters above are for 10 kHz
+
+
+def rescale_pulse(ps: PulseSequence, duration_s, dt, umax) -> PulseSequence:
+    """The same rotations in another duration (and on sub-pulses of dt, 100 % = umax): time stretched, amplitude
+    scaled by the inverse factor (clipped at 100 % if the duration is too short for the rf amplitude),
+    unwrapped phase interpolated."""
+    n = max(4, int(round(duration_s / dt)))
+    x_old, x_new = (np.arange(ps.N) + 0.5) / ps.N, (np.arange(n) + 0.5) / n
+    amp = np.interp(x_new, x_old, np.asarray(ps.amplitude, float)) * (ps.umax * ps.duration) / (umax * n * dt)
+    phase = np.degrees(np.interp(x_new, x_old, np.unwrap(np.radians(np.asarray(ps.phase, float)))))
+    return PulseSequence(np.clip(amp, 0.0, 100.0), (phase + 180.0) % 360.0 - 180.0, dt, umax)
+
+
+def family_start(kind, duration_s, dt, umax) -> PulseSequence:
+    """4H or 6H (robust identity pulses: offset-robust error curves; GRAPE turns them into the gate) brought to
+    the duration (see rescale_pulse; shorter than its natural duration the amplitude is clipped)."""
+    from psa.design.families import family_by_name
+    name, values = FAMILY_STARTS[kind]
+    ps = family_by_name(name).pulse(values, 0.5e-6, FAMILY_UMAX)
+    return rescale_pulse(ps, duration_s, dt, umax)
+
+
+def family_natural_duration(kind, umax):
+    """Duration (s) of the 4H / 6H start at full amplitude for the rf amplitude umax."""
+    return {"4H": 398e-6, "6H": 490e-6}[kind] * FAMILY_UMAX / umax
 
 
 def stretch_pulse(ps: PulseSequence, duration_s):

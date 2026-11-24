@@ -26,7 +26,8 @@ from psa.design.grape import EXPLORATION_PRESETS, GrapeConfig, Search, explorati
 from psa.design.optimize import SolverSettings
 from psa.design.points import format_values, grid_points, is_grid, parse_values
 from psa.design.pulse import PulseSequence
-from psa.design.quick import QuickRun, quick_config, rectangular_start, resample_pulse, stretch_pulse
+from psa.design.quick import (QuickRun, family_natural_duration, family_start, for_start_pulse, quick_config,
+                              rectangular_start, resample_pulse, stretch_pulse)
 from psa.editor_gui.widgets import ACCENT, ACCENT_2, BAD, GOOD, MUTED_FG, lock_heights, make_plot, spawn_single_blas
 
 START_COLORS = ("#f59e0b", "#a78bfa", "#34d399", "#f472b6", "#60a5fa", "#fbbf24", "#f87171", "#2dd4bf")
@@ -50,7 +51,10 @@ QUICK_TIP = ("Quick mode: give the gate, duration, bandwidth and a time budget; 
              "stage, and in the last 20 % of the time the 3 best pulses are re-optimized with the limits. The result "
              "is the pulse with the smallest worst-case infidelity over the band (401 test offsets) that keeps the "
              "limits. Optional B1 range: the offsets times 2 B1 values per 1/T on the axis (scaling − 1) × rf (at least 3), "
-             "scored over the whole area. Start: rectangular pulse, rf amplitude from the editor's metadata.")
+             "scored over the whole area. Start: rectangular pulse (default), a pulse file, or a 4H / 6H pulse "
+             "(robust identity pulses, brought to the duration); with a real start pulse (also the warm start of a "
+             "series) half of the 22 starts stay near it, the other half are random. rf amplitude from the "
+             "editor's metadata.")
 
 
 def start_workers(ctx, n, args):
@@ -172,9 +176,14 @@ class GrapeTab(QWidget):
         self.q_dur_spin = QDoubleSpinBox(); self.q_dur_spin.setRange(1, 1e5); self.q_dur_spin.setDecimals(1)
         self.q_dur_spin.setSuffix(" µs"); self.q_dur_spin.setValue(450.0)
         srow0 = QHBoxLayout()
-        self.q_start_box = QComboBox(); self.q_start_box.addItems(["rectangular", "from file"])
-        self.q_start_box.setToolTip("start pulse of the quick run: a rectangular pulse (default) or a pulse file "
-                                    "(.bruker / .csv); a file sets the duration, and is stretched to other durations")
+        self.q_start_box = QComboBox(); self.q_start_box.addItems(["rectangular", "from file", "4H", "6H"])
+        self.q_start_box.setToolTip(
+            "start pulse of the quick run:\n"
+            "rectangular (default): the quick recipe as studied, the start is 1 of 22 starts\n"
+            "from file (.bruker / .csv): sets the duration, stretched to other durations\n"
+            "4H / 6H: robust identity pulses (offset robust to 2nd / 3rd order; 398 / 490 µs at 10 kHz), brought "
+            "to the duration; GRAPE turns them into the gate\n"
+            "With a real start pulse (not rectangular) 11 of the 22 starts stay near it and 11 are random.")
         self.q_start_edit = QLineEdit(); self.q_start_edit.setPlaceholderText("pulse file (.bruker / .csv)")
         self.q_start_edit.editingFinished.connect(self._load_quick_start)
         self.q_start_button = QPushButton("…"); self.q_start_button.setFixedWidth(32)
@@ -331,6 +340,13 @@ class GrapeTab(QWidget):
         self.b1_check = QCheckBox("B1 1st order")
         self.b1_check.setToolTip("first-order robustness against amplitude scaling, at every point")
         orow.addSpacing(12); orow.addWidget(self.b1_check); orow.addStretch()
+        self.shortest_button = QPushButton("Shortest pulse…")
+        self.shortest_button.setToolTip("find the shortest pulse that reaches the gate goal and the ticked orders / B1 "
+                                        "exactly (on resonance, at most 100 % rf): a search over the duration in a "
+                                        "small window")
+        self.shortest_button.clicked.connect(self.open_shortest_window)
+        self.shortest_window = None
+        orow.addWidget(self.shortest_button)
         rl.addLayout(orow)
         lrow = QHBoxLayout()
         self.reweight_spin = QSpinBox(); self.reweight_spin.setRange(0, 1000); self.reweight_spin.setSpecialValueText("off")
@@ -565,7 +581,10 @@ class GrapeTab(QWidget):
                                [s.value() for s in self.m0_spins], [s.value() for s in self.mt_spins],
                                self.q_amp_rate_spin.value(), self.q_phase_rate_spin.value(),
                                seed=self.q_seed_spin.value(), dt=self.dt, b1_range=self.quick_b1_range(),
-                               umax_hz=self.umax, freedom=self.freedom, max_delay_us=self.delay_spin.value())
+                               umax_hz=self.umax, freedom=self.freedom, max_delay_us=self.delay_spin.value(),
+                               real_start=self.q_start_box.currentIndex() != 0)
+        if self.q_start_box.currentIndex() >= 2:
+            return family_start(self.q_start_box.currentText(), T, self.dt, self.umax), cfg, st
         if self.q_start_box.currentIndex() == 1:
             if self._quick_file_pulse is None:
                 raise ValueError("start pulse: choose a pulse file (or 'rectangular')")
@@ -581,6 +600,16 @@ class GrapeTab(QWidget):
         if on and self._quick_file_pulse is not None:
             self._set_quick_duration(self._quick_file_pulse)
         self._quick_info()
+
+    def _family_start_note(self):
+        """Hint if a 4H / 6H start is shorter than its natural duration (its amplitude is then clipped)."""
+        if self.q_start_box.currentIndex() < 2 or not getattr(self, "umax", 0):
+            return ""
+        kind = self.q_start_box.currentText()
+        nat = family_natural_duration(kind, self.umax)
+        if self.q_dur_spin.value() * 1e-6 < nat * (1 - 1e-6):
+            return f"; {kind} start shorter than its {nat * 1e6:.0f} µs: amplitude clipped (still a start)"
+        return ""
 
     def _choose_quick_start(self):
         from PySide6.QtWidgets import QFileDialog
@@ -642,6 +671,57 @@ class GrapeTab(QWidget):
         if folder:
             self.q_folder_edit.setText(folder)
 
+    def shortest_spec(self):
+        """(ShortestSpec, description) of the shortest-pulse search from the gate goal, the offset orders and B1
+        (ValueError if they cannot be used)."""
+        from psa.design.shortest import ShortestSpec
+        i = self.gate_box.currentIndex()
+        if i == 0:
+            raise ValueError("needs a gate goal (UR or PP)")
+        orders = sorted(k for k, c in self.order_checks.items() if c.isChecked())
+        if orders != list(range(1, len(orders) + 1)):
+            raise ValueError("the offset orders must be 1st, 1st + 2nd or 1st – 3rd (no gaps)")
+        if self.freedom != "none":
+            raise ValueError("freedom (free phase / linear phase) is not supported by the search: set it to none")
+        vec = lambda spins: [s.value() for s in spins]
+        spec = ShortestSpec(gate="UR" if i == 1 else "PP", axis=vec(self.axis_spins), angle_deg=self.angle_spin.value(),
+                            m0=vec(self.m0_spins), mt=vec(self.mt_spins), order=len(orders),
+                            b1=self.b1_check.isChecked(), dt=self.dt, umax=self.umax)
+        if spec.gate == "PP" and (not any(spec.m0) or not any(spec.mt)):
+            raise ValueError("m0 and the target must not be zero")
+        spec.check()
+        fv = lambda v: "(" + ", ".join(f"{x:g}" for x in v) + ")"
+        goal = (f"UR {spec.angle_deg:g}° about {fv(spec.axis)}" if spec.gate == "UR"
+                else f"PP {fv(spec.m0)} → {fv(spec.mt)}")
+        rob = ([f"offset orders 1–{spec.order}" if spec.order > 1 else "offset order 1"] if spec.order else [])
+        rob += ["B1 1st order"] if spec.b1 else []
+        return spec, (f"{goal}, {', '.join(rob) or 'no robustness (gate only)'}; on resonance, rf "
+                      f"{self.umax / 1e3:g} kHz, sub-pulses {self.dt * 1e6:g} µs")
+
+    def open_shortest_window(self):
+        if self.shortest_window is None:
+            from psa.editor_gui.shortest_window import ShortestWindow
+            self.shortest_window = ShortestWindow(self.shortest_spec, lambda: self.start_pulse, self)
+            self.shortest_window.pulseFound.connect(self._shortest_pulse)
+            self.shortest_window.runningChanged.connect(self._shortest_running)
+            if self.start_pulse is not None:
+                self.shortest_window.start_spin.setValue(round(self.start_pulse.duration * 1e6, 1))
+        self.shortest_window.show(); self.shortest_window.raise_(); self.shortest_window.activateWindow()
+
+    def _shortest_pulse(self, ps):
+        """An accepted pulse of the shortest-pulse search: shown as the tab's result."""
+        self.result = ps
+        self._show_result(ps)
+        T = max(ps.duration, self.start_pulse.duration if self.start_pulse is not None else 0.0) * 1e6
+        self.amp_plot.setXRange(0, T, padding=0.02)
+        self._show(f"shortest-pulse search: {ps.duration * 1e6:.1f} µs (N = {ps.N}) – shown as the result "
+                   "(\"Result → start\" continues from it)")
+        self.pulseChanged.emit(ps)
+
+    def _shortest_running(self, on):
+        self.solve_button.setEnabled(not on)
+        self.solve_button.setToolTip("the shortest-pulse search is running" if on else "")
+
     def open_library_window(self):
         if self.library_window is None:
             from psa.editor_gui.library_window import LibraryWindow
@@ -677,11 +757,12 @@ class GrapeTab(QWidget):
         b1 = self.quick_b1_range()
         n_b1 = b1_count(b1, getattr(self, "umax", 0.0) or 0.0, T) if b1[1] >= b1[0] else 1
         if n_b1 <= 1:
-            self.q_points_info.setText(f"{n_off} offsets (nominal amplitude)")
+            self.q_points_info.setText(f"{n_off} offsets (nominal amplitude)" + self._family_start_note())
             return
         self.q_points_info.setText(f"{n_off} offsets × {n_b1} B1 values = {n_off * n_b1} points: each evaluation "
                                    f"is ~{n_b1}× slower than without B1; a longer time budget helps "
-                                   f"(e.g. {min(600, self.q_budget_spin.value() * n_b1):g} min)")
+                                   f"(e.g. {min(600, self.q_budget_spin.value() * n_b1):g} min)"
+                                   + self._family_start_note())
 
     # ------------------------------------------------------------- points ---
     def grid_selection(self):
@@ -955,6 +1036,7 @@ class GrapeTab(QWidget):
         x = self._times(ps)
         self.amp_start.setData(x, ps.amplitude); self.phase_start.setData(x, ps.phase)
         self.amp_curve.setData([], []); self.phase_curve.setData([], [])
+        self.amp_plot.setXRange(0, x[-1], padding=0.02)                   # the time axis follows the start pulse
         self._show("")
         if self.preset_box.currentText() in EXPLORATION_PRESETS:
             self.apply_preset(self.preset_box.currentText())
@@ -1010,7 +1092,7 @@ class GrapeTab(QWidget):
                  self.reg_box, self.reg_weight, self.noise_spin, self.full_radio, self.spline_radio, self.spline_spin,
                  self.smooth_edit, self.amp_rate_spin, self.phase_rate_spin, self.starts_spin, self.spread_spin,
                  self.preset_box, self.reweight_spin, self.reweight_power_spin, self.limits_late_check, self.area_check,
-                 self.quick_radio, self.expert_radio, self.freedom_box, self.delay_spin] + self.gen_widgets + self.explore_dialog.widgets + self.quick_widgets)
+                 self.quick_radio, self.expert_radio, self.freedom_box, self.delay_spin, self.shortest_button] + self.gen_widgets + self.explore_dialog.widgets + self.quick_widgets)
 
     def _set_inputs_enabled(self, on):
         for w in self._inputs():
@@ -1037,6 +1119,7 @@ class GrapeTab(QWidget):
                     prev = self._series.get("last_pulse")
                     if self._series["settings"]["warm_start"] and prev is not None:
                         ps0 = stretch_pulse(prev, T)          # warm start: the previous result, stretched
+                        cfg = for_start_pulse(cfg)            # a real start: half of the starts near it
                 else:
                     ps0, cfg, settings = self.quick_setup()
             except (ValueError, OSError) as e:
@@ -1046,6 +1129,7 @@ class GrapeTab(QWidget):
             self.set_start(ps0)
             n_workers = self.max_parallel()
             self._quick = QuickRun(ps0, cfg, settings, budget, parallel=n_workers)
+            self._quick_shown = None
             self._search = self._quick
         else:
             if self.start_pulse is None:
@@ -1092,6 +1176,8 @@ class GrapeTab(QWidget):
             self._tasks.put(None)
 
     def stop(self, wait=False):
+        if wait and self.shortest_window is not None:
+            self.shortest_window.stop(wait=True)
         if not self.solving:
             return
         self._stop_event.set()
@@ -1160,6 +1246,20 @@ class GrapeTab(QWidget):
         pulse.save(path)
         return path
 
+    def _show_quick_best(self):
+        """Live display of a quick run: the best pulse within the rate limits, or, as long as there is none (the
+        limits come in the last stage), the best pulse so far without them."""
+        q = self._quick
+        q.improved = False
+        rec = q.incumbent if q.incumbent is not None else q.best_any
+        if rec is None or rec is self._quick_shown:
+            return
+        self._quick_shown = rec
+        ps = PulseSequence(np.asarray(rec["amp"]), np.asarray(rec["phase"]), self.start_pulse.dt, self.start_pulse.umax)
+        self.result = ps
+        self._show_result(ps)
+        self.pulseChanged.emit(ps)
+
     def _quick_progress_text(self):
         q = self._quick
         phase = {"search": f"searching ({len(q.cands)} candidates, round {q.round + 1})",
@@ -1168,8 +1268,12 @@ class GrapeTab(QWidget):
         inc = q.incumbent
         where = (f" (at {inc['band']['worst at offset [kHz]']:g} kHz, {inc['band']['worst at B1 [%]']:g} %)"
                  if inc is not None and "worst at B1 [%]" in inc["band"] else "")
+        anyb = q.best_any
         best = (f"best within the limits: worst infidelity {inc['band']['worst infidelity']:.2e}{where}, mean "
-                f"{inc['band']['mean infidelity']:.2e}" if inc is not None else "no pulse within the limits yet")
+                f"{inc['band']['mean infidelity']:.2e}" if inc is not None else
+                f"best so far (shown; rate limits not applied yet, they come in the last stage): worst infidelity "
+                f"{anyb['band']['worst infidelity']:.2e}, mean {anyb['band']['mean infidelity']:.2e}"
+                if anyb is not None else "no pulse yet")
         sr = self._series
         series = (f"series: pulse {sr['index'] + 1} of {len(sr['durations'])} ({sr['durations'][sr['index']] * 1e6:.0f} µs) – "
                   if sr is not None else "")
@@ -1240,14 +1344,8 @@ class GrapeTab(QWidget):
                 self._search.submit(res)
                 if (self._search.phase, self._search.round) != rnd:
                     self._recolor()
-                if self._quick is not None and self._quick.improved:        # show the best pulse within the limits
-                    self._quick.improved = False
-                    inc = self._quick.incumbent
-                    ps = PulseSequence(np.asarray(inc["amp"]), np.asarray(inc["phase"]), self.start_pulse.dt,
-                                       self.start_pulse.umax)
-                    self.result = ps
-                    self._show_result(ps)
-                    self.pulseChanged.emit(ps)
+                if self._quick is not None:
+                    self._show_quick_best()
                 self._dispatch()
                 changed = True
         if self._stop_requested_at is not None and time.time() - self._stop_requested_at > STOP_GRACE_S:

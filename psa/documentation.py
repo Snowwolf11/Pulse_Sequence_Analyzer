@@ -233,9 +233,18 @@ like classical GRAPE. The duration and the number of sub-pulses stay those of th
   Freedom: the gate goal's freedom row (none / free phase / linear phase) also applies in quick mode; the
   run is then scored up to the z-rotation fitted at the points, and the status shows the fitted phase and
   delay (not yet part of the study).
-  Start pulse: rectangular (default) or from a file (.bruker / .csv). A file sets the duration (the first
-  one of a series); it is resampled to the editor's sub-pulse duration and rf amplitude (same rf field) and
-  stretched to other durations. In a series without warm start every duration starts from it.
+  Start pulse: rectangular (default), from a file (.bruker / .csv), 4H or 6H. A file sets the duration (the
+  first one of a series); it is resampled to the editor's sub-pulse duration and rf amplitude (same rf field)
+  and stretched to other durations. In a series without warm start every duration starts from it. 4H / 6H are
+  the robust identity pulses of the pulse families (offset robust to 2nd / 3rd order, 398 / 490 µs at 10 kHz),
+  brought to the duration with the same rotations (time stretched, amplitude scaled; shorter than that the
+  amplitude is clipped, shown in the info line); GRAPE turns them into the gate.
+  With a real start pulse (file, 4H / 6H, warm start) the 22 starts are a mix: the start pulse itself, 10
+  copies perturbed only slightly (spread 0.1 instead of 1.0) and 11 random pulses. With the rectangular start
+  the recipe is as studied (the perturbed copies are far from it). Start-pulse study
+  (studies/start_pulse_study.py): on a wide band (±10 kHz, B1 85–115 %) a 4H start with the mix gained about
+  0.2 decades of the worst infidelity over the rectangular quick run; on a narrow band the start did not matter;
+  only-near starts ("refine") can get stuck, which the random half avoids.
   Output folder (optional for a single pulse): the result is saved as
   pulse_{µs}_{goal}_{range}_{index}.bruker, e.g. pulse_0550us_UR235-180_off20_B140_2.bruker: duration
   rounded to µs (4 digits); the goal most points have, UR{axis}-{angle} or PP{m0}-{target} with vectors as
@@ -246,7 +255,7 @@ like classical GRAPE. The duration and the number of sub-pulses stay those of th
   Series ("series to … , n pulses"): a pulse library, one quick run per duration (evenly spaced, rounded to
   µs); the time is the total, split in proportion to the durations. Warm start (option): from the second
   duration on, the start pulse is the previous result stretched to the new duration (amplitude and
-  unwrapped phase interpolated) instead of a rectangular pulse. The pulses go into a new folder named
+  unwrapped phase interpolated) instead of the chosen start pulse (a real start: the mix above). The pulses go into a new folder named
   like a single pulse with the duration range (pulse_0100-0600us_UR235-180_off20_B140_1/) as
   pulse_0405us.bruker, plus library.json with the settings and the score of every pulse (written after
   each one). Stop ends the series after saving the current pulse (best so far). "Library…" opens the
@@ -281,6 +290,25 @@ like classical GRAPE. The duration and the number of sub-pulses stay those of th
   • Score over the area (optional, on by default): after the run, the gate infidelity on 201 offsets
     (× 11 B1 values if the points have several) over the range of the points, i.e. also between them;
     the status shows the worst value and where it is, the mean and the fraction below 1e-4.
+  • Shortest pulse… (button next to the orders): a small window that searches the shortest pulse doing the
+    gate goal exactly and cancelling the offset error through the ticked orders (1st, 1st + 2nd or 1st – 3rd,
+    no gaps) and optionally first-order B1, on resonance, at most 100 % rf (the editor's rf amplitude and
+    sub-pulse duration; the tab's points and freedom are not used, freedom must be none). Method: GRAPE in
+    local mode solves the goals at the start duration (lengthened by 25 % up to 4 times if needed), then the
+    duration is shortened in 10 % steps and, after the first failure, by bisection down to one sub-pulse.
+    Candidates at every duration: the shortest solution so far squeezed in time (amplitude scaled up, clipped
+    at 100 %) and 2 perturbed copies; only if they fail, fresh starts (3 random pulses, CORPSE, 2H, 4H, 6H,
+    optionally the tab's start pulse). A candidate that stops improving is given up early. Every accepted
+    pulse is checked independently (exact jets: gate error < 1e-10, |A_k|/T^k < 1e-8, B1 < 1e-8) and shown in
+    the tab's plots; the shortest one stays as the tab's result ("Result → start", Save… in the window).
+    The status gives a simple lower bound (gate only: angle / (360° · rf); with 1st order: 1 / rf, Fenchel's
+    theorem). It is a local search: the shortest pulse found, not a proof. Reliability check
+    (studies/shortest_reliability.py, 10 kHz, 0.5 µs; Rx(90°) / Rx(180°), orders 1–3, with and without B1,
+    3 seeds and start durations each): all 12 cases gave the same minimum 3 times, e.g. Rx(180°) 1st order
+    117.0 µs (short CORPSE, 116.7 µs, on the 0.5 µs grid), Rx(90°) 1st order 102.0 µs, 2nd order 201.5 /
+    214.5 µs, 3rd order 239.5 / 252.0 µs, with B1 180.0 µs (1st), 214.0 / 228.5 µs (2nd), 289.0 / 288.0 µs
+    (3rd); 4–36 min per search on 10 processes. Seed: repeat with another seed and start duration to check a
+    result. Time limit: the search ends with the shortest pulse so far (checked between durations); Stop too.
 - Gate goal: none, UR (rotation angle about an axis; the whole rotation) or PP (point to point: initial
   magnetization m0 to a target). For PP the robustness terms only count the error that moves m0.
 - Freedom (expert mode): the gate goals only have to hold up to a z-rotation after the pulse, fitted by
